@@ -59,13 +59,13 @@ requires HTTPS. Any of these work:
 - **Another container host** (Fly.io, Railway, ...) using the `Dockerfile`.
   Mount a persistent volume at `/data`; the database lives there.
 
-The host must keep a disk between restarts. Without one, the database is wiped
-on every deploy.
-
   ```sh
   docker build -t flatapp .
   docker run -p 8080:8080 -v flatapp-data:/data flatapp
   ```
+
+The host must keep a disk between restarts. Without one, the database is wiped
+on every deploy.
 
 Back up the single SQLite file to back up everything.
 
