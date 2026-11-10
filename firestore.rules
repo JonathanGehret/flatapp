@@ -1,0 +1,47 @@
+rules_version = '2';
+
+// Access model: a flat's document id is its invite code, a 10-character
+// random secret. Whoever knows the code may read and edit that flat. Nobody
+// can list flats, so codes cannot be discovered.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function validFlat(flat) {
+      return flat.name is string && flat.name.size() > 0 && flat.name.size() <= 40
+        && flat.tz is string && flat.tz.size() <= 64
+        && flat.members is map && flat.members.size() >= 1 && flat.members.size() <= 60
+        && flat.chores is map && flat.chores.size() <= 300
+        && flat.rewards is map && flat.rewards.size() <= 600
+        && flat.scores is map && flat.scores.size() <= 600;
+    }
+
+    match /flats/{code} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if code.matches('^[A-HJKMNP-Z2-9]{10}$') && validFlat(request.resource.data);
+      allow update: if validFlat(request.resource.data);
+      allow delete: if false;
+
+      // Finished and passed-on chores. Entries are immutable; undo deletes one.
+      match /log/{entry} {
+        allow read, delete: if true;
+        allow create: if request.resource.data.kind in ['done', 'skip']
+          && request.resource.data.points is int
+          && request.resource.data.points >= 0 && request.resource.data.points <= 3
+          && request.resource.data.title is string && request.resource.data.title.size() <= 80
+          && request.resource.data.date is string && request.resource.data.date.size() == 10
+          && request.resource.data.at is number;
+        allow update: if false;
+      }
+
+      // Push tokens. Devices can register and remove themselves, but tokens
+      // are only ever read by the reminder job (which bypasses these rules).
+      match /devices/{device} {
+        allow read: if false;
+        allow create, update: if request.resource.data.keys().hasOnly(['token', 'member_id', 'at'])
+          && request.resource.data.token is string && request.resource.data.token.size() <= 4096
+          && request.resource.data.member_id is string && request.resource.data.member_id.size() <= 40;
+        allow delete: if true;
+      }
+    }
+  }
+}

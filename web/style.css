@@ -139,6 +139,14 @@ main { flex: 1; padding: 4px 16px calc(150px + env(safe-area-inset-bottom)); }
 
 .bar { height: 8px; background: var(--line); border-radius: 4px; margin-top: 6px; overflow: hidden; }
 .bar i { display: block; height: 100%; border-radius: 4px; }
+.nudge {
+  display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 10px 12px;
+  border-radius: var(--radius); background: var(--accent-soft);
+}
+.nudge .grow { flex: 1; min-width: 0; }
+.nudge .sub { font-size: 13px; color: var(--muted); }
+.nudge .icon, .nudge .close { background: var(--surface); }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
 .gain { color: var(--accent); font-weight: 650; }
 .winner {
   display: flex; align-items: center; gap: 14px; margin-top: 12px; padding: 14px 16px;

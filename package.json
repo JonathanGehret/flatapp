@@ -1,0 +1,10 @@
+{
+  "name": "flatapp",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs reminders/*.test.mjs",
+    "dev": "firebase emulators:start --project demo-flatapp",
+    "deploy": "firebase deploy --only hosting,firestore:rules"
+  }
+}

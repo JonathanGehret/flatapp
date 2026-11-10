@@ -1,0 +1,37 @@
+name: Chore reminders
+
+# Sends push notifications for chores that are due. Times are in UTC; GitHub
+# may start scheduled runs some minutes late. Adjust to your flat's mornings
+# and evenings (07:00 and 17:00 UTC are 08:00 and 18:00 in Central Europe in
+# winter).
+on:
+  schedule:
+    - cron: '0 7 * * *'
+    - cron: '0 17 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Only log how many reminders would be sent
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: reminders/package-lock.json
+      - run: npm ci
+        working-directory: reminders
+      - run: node send.mjs
+        working-directory: reminders
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}

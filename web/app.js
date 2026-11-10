@@ -1,9 +1,13 @@
-// Flatapp client. The server returns the flat's full state after every
-// change, so the UI is always a pure render of `state`.
+// Flatapp client. `store.js` keeps `state` in sync with Firestore; the UI is
+// a pure render of it.
+
+import * as store from './store.js';
+import { vapidKey } from './firebase-config.js';
+import { fmt, toDate } from './schedule.js';
 
 const LS_SESSION = 'flatapp.session';
 const LS_STATE = 'flatapp.state';
-const POLL_MS = 30_000;
+const LS_DEVICE = 'flatapp.device';
 
 const ICONS = ['🧹', '🧽', '🍽️', '🚿', '🚽', '🗑️', '♻️', '🧺', '🪟', '🛒', '🌱', '🧊', '🛏️', '🧴', '📦', '🐈', '🔧', '✨'];
 const EFFORT = ['', 'Quick', 'Medium', 'Big'];
@@ -31,9 +35,10 @@ const write = (key, value) => {
 };
 
 let session = read(LS_SESSION); // { code, memberId }
-let state = session ? read(LS_STATE) : null;
+let state = session ? read(LS_STATE) : null; // last known state, for an instant first paint
+let device = read(LS_DEVICE); // { id, on, nudged }: this device's reminder setting
 // `joining` holds a flat we can see but have not picked a person in yet.
-const ui = { tab: 'tasks', filter: 'mine', offline: false, joining: null, setup: false };
+const ui = { tab: 'tasks', filter: 'mine', offline: !navigator.onLine, joining: null, setup: false };
 
 const app = document.getElementById('app');
 const sheet = document.getElementById('sheet');
@@ -45,8 +50,6 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (ch) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
 ));
 const pad = (n) => String(n).padStart(2, '0');
-const fmt = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-const toDate = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
 const todayStr = () => fmt(new Date());
 const addDays = (s, n) => { const d = toDate(s); d.setDate(d.getDate() + n); return fmt(d); };
 const diffDays = (a, b) => Math.round((toDate(a) - toDate(b)) / 864e5);
@@ -57,7 +60,7 @@ const formatCode = (code) => `${code.slice(0, 5)}-${code.slice(5)}`;
 const member = (id) => state.members.find((m) => m.id === id);
 const activeMembers = () => state.members.filter((m) => m.active);
 const me = () => state?.members.find((m) => m.id === session?.memberId && m.active);
-const chore = (id) => state.chores.find((c) => c.id === Number(id));
+const chore = (id) => state.chores.find((c) => c.id === id);
 
 function avatar(m, cls = '') {
   if (!m) return `<span class="avatar anyone ${cls}" title="Anyone">★</span>`;
@@ -86,33 +89,20 @@ function toast(text, action) {
   toastTimer = setTimeout(() => toastEl.classList.remove('show'), action ? 6000 : 3200);
 }
 
-// ---------- server ----------
+// ---------- data ----------
 
-async function api(method, path, body, code = session?.code) {
-  let res;
-  try {
-    res = await fetch(`/api${path}`, {
-      method,
-      headers: { 'Content-Type': 'application/json', ...(code ? { 'X-Flat-Code': code } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-  } catch {
-    const err = new Error("You're offline. Try again once you're connected.");
-    err.offline = true;
-    throw err;
-  }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data.error || 'Something went wrong');
-    err.status = res.status;
-    throw err;
-  }
-  return data;
+function friendly(err) {
+  if (err?.code === 'unavailable') return "You're offline. Try again once you're connected.";
+  if (err?.code === 'permission-denied') return 'That change was not allowed.';
+  return err?.message || 'Something went wrong';
 }
 
+let lastRendered = '';
 function setState(next) {
+  const json = JSON.stringify(next);
+  if (json === lastRendered) return; // Firestore also reports metadata-only changes
+  lastRendered = json;
   state = next;
-  ui.offline = false;
   write(LS_STATE, state);
   // Removed from the flat on another device: ask who is using this phone.
   if (session && !me()) {
@@ -122,51 +112,87 @@ function setState(next) {
   render();
 }
 
-function setSession(next, keepState = false) {
+/** `keepFlat` stays connected to the flat, e.g. to pick a different person. */
+function setSession(next, keepFlat = false) {
   session = next;
   write(LS_SESSION, session);
-  if (!next && !keepState) { state = null; write(LS_STATE, null); }
+  if (!next && !keepFlat) {
+    state = null;
+    lastRendered = '';
+    write(LS_STATE, null);
+    store.close();
+  }
 }
 
-/** Runs a change and re-renders. Resolves to false (after a toast) on failure. */
-async function mutate(method, path, body) {
+function follow(code) {
+  store.open(code, ({ state: next, missing }) => {
+    if (missing) {
+      ui.joining = null;
+      setSession(null);
+      render();
+      toast('This flat no longer exists.');
+    } else {
+      setState(next);
+    }
+  }, (err) => toast(friendly(err)));
+}
+
+/** Runs a change. Resolves to its result, or false (after a toast) on failure. */
+async function run(change) {
   try {
-    setState(await api(method, path, body));
-    return true;
+    return (await change()) ?? true;
   } catch (err) {
-    toast(err.message);
+    toast(friendly(err));
     return false;
   }
 }
 
-async function refresh() {
-  if (!session) return;
-  try {
-    const next = await api('GET', '/state');
-    if (JSON.stringify(next) !== JSON.stringify(state) || ui.offline) setState(next);
-  } catch (err) {
-    if (err.status === 401) {
-      setSession(null);
-      render();
-      toast('This flat no longer exists.');
-    } else if (!ui.offline) {
-      ui.offline = true;
-      render();
-    }
-  }
-}
-
 async function lookUpFlat(rawCode) {
-  const code = rawCode.replace(/[^a-z0-9]/gi, '').toUpperCase();
+  const code = store.normalizeCode(rawCode);
   if (!code) return;
   try {
-    state = await api('GET', '/state', null, code);
-    if (session) setSession(null, true); // switching flats: the old identity does not apply
-    ui.joining = { code };
-    render();
+    if (!(await store.flatExists(code))) return toast("That code doesn't match any flat.");
   } catch (err) {
-    toast(err.status === 401 ? "That code doesn't match any flat." : err.message);
+    return toast(friendly(err));
   }
+  dropDevice();
+  setSession(null); // switching flats: the old identity does not apply
+  ui.joining = { code };
+  follow(code);
+  render();
+}
+
+// ---------- reminders ----------
+
+const pushAvailable = () => Boolean(vapidKey) && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const pushOn = () => Boolean(device?.on) && pushAvailable() && Notification.permission === 'granted';
+const setDevice = (next) => { device = next; write(LS_DEVICE, device); };
+
+/** Registers this device's push token for the current person. */
+async function registerDevice() {
+  const { enable } = await import('./push.js');
+  const token = await enable();
+  const id = device?.id ?? crypto.randomUUID();
+  await store.saveDevice(session.code, id, session.memberId, token);
+  setDevice({ ...device, id, on: true });
+}
+
+/** Keeps the token fresh and attached to whoever uses this device now. */
+function syncDevice() {
+  if (session && pushOn()) registerDevice().catch(() => {});
+}
+
+/** Stops reminders for the person who was using this device. */
+function dropDevice() {
+  if (session && device?.on) store.removeDevice(session.code, device.id).catch(() => {});
+}
+
+function setupNotice() {
+  return `<div class="shell"><div class="welcome">
+    <img class="logo" src="icon.svg" alt="">
+    <h1>Almost there.</h1>
+    <p>This copy of Flatapp is not connected to a Firebase project yet. Add your project's settings to <code>web/firebase-config.js</code> and deploy again. The README has the steps.</p>
+  </div></div>`;
 }
 
 // ---------- screens: getting in ----------
@@ -264,7 +290,13 @@ function tasksView() {
     if (!items.length) return '';
     return `<div class="section ${cls}"><h2>${name}</h2><small>${items.length}</small></div>${items.map(choreCard).join('')}`;
   }).join('');
-  return filter + (html || `<div class="empty"><div class="big">🎉</div><b>Nothing on your plate</b>None of the chores are yours right now.</div>`);
+  const nudge = pushAvailable() && !device?.on && !device?.nudged ? `<div class="nudge">
+      <span class="icon">🔔</span>
+      <div class="grow"><b>Get reminded</b><div class="sub">A notification when your chores are due.</div></div>
+      <button class="link" data-action="push-on">Turn on</button>
+      <button class="close" data-action="push-later" aria-label="Not now">✕</button>
+    </div>` : '';
+  return filter + nudge + (html || `<div class="empty"><div class="big">🎉</div><b>Nothing on your plate</b>None of the chores are yours right now.</div>`);
 }
 
 function choresView() {
@@ -376,6 +408,13 @@ function flatView() {
       <button class="btn ghost" data-action="copy">Copy code</button>
     </div>
   </div>
+  ${vapidKey ? `<div class="section"><h2>Reminders</h2></div>
+  <div class="panel">${pushAvailable() ? `<div class="row">
+      <span class="icon">🔔</span>
+      <div class="grow">Notify this device when my chores are due<div class="sub">${pushOn() ? 'On' : 'Off'}</div></div>
+      <button class="link" data-action="${pushOn() ? 'push-off' : 'push-on'}">${pushOn() ? 'Turn off' : 'Turn on'}</button>
+    </div>` : `<div class="row"><div class="grow sub">Notifications are not available here. On iPhone, first add the app to your home screen (Safari → Share → Add to Home Screen), then open it from there.</div></div>`}
+  </div>` : ''}
   <div class="section"><h2>People</h2></div>
   <div class="panel">
     ${activeMembers().map((m) => `<div class="row">
@@ -505,13 +544,11 @@ function formSheet(id) {
 
 // ---------- actions ----------
 
-const logBody = (memberId = session.memberId) => ({ member_id: Number(memberId), date: todayStr() });
-
-async function complete(id, memberId) {
+async function complete(id, memberId = session.memberId) {
   const c = chore(id);
-  if (!c || !(await mutate('POST', `/chores/${c.id}/complete`, logBody(memberId)))) return;
-  const entry = state.activity.find((a) => a.chore_id === c.id);
-  toast(`Done: ${c.title}`, entry && { label: 'Undo', run: () => mutate('DELETE', `/completions/${entry.id}`) });
+  if (!c) return;
+  const entryId = await run(() => store.completeChore(c.id, memberId, todayStr()));
+  if (entryId) toast(`Done: ${c.title} · +${c.points}`, { label: 'Undo', run: () => run(() => store.undo(entryId)) });
 }
 
 const actions = {
@@ -522,18 +559,19 @@ const actions = {
   edit: (el) => formSheet(el.dataset.id),
   close: () => sheet.close(),
   done: (el) => complete(el.dataset.id),
-  undo: (el) => mutate('DELETE', `/completions/${el.dataset.id}`),
+  undo: (el) => run(() => store.undo(el.dataset.id)),
 
   async skip(el) {
-    if (await mutate('POST', `/chores/${el.dataset.id}/skip`, logBody())) {
+    const next = await run(() => store.skipChore(el.dataset.id, session.memberId, todayStr()));
+    if (next) {
       sheet.close();
-      toast(`Now it's ${member(chore(el.dataset.id)?.assignee_id)?.name ?? 'someone else'}'s turn`);
+      toast(`Now it's ${member(next)?.name ?? 'someone else'}'s turn`);
     }
   },
   async delete(el) {
     const c = chore(el.dataset.id);
     if (!c || !confirm(`Delete "${c.title}"? Points already earned are kept.`)) return;
-    if (await mutate('DELETE', `/chores/${c.id}`)) sheet.close();
+    if (await run(() => store.deleteChore(c.id))) sheet.close();
   },
   'pick-value'(el) {
     const picker = el.closest('[data-picker]');
@@ -542,10 +580,10 @@ const actions = {
   },
 
   pick(el) {
-    setSession({ code: ui.joining.code, memberId: Number(el.dataset.id) }, true);
+    setSession({ code: ui.joining.code, memberId: el.dataset.id });
     ui.joining = null;
-    write(LS_STATE, state);
     render();
+    syncDevice();
   },
   'leave-now'() { ui.joining = null; setSession(null); render(); },
   'skip-setup'() { ui.setup = false; render(); },
@@ -564,30 +602,50 @@ const actions = {
   async 'add-member'() {
     const name = prompt('Name of the new flatmate');
     if (!name?.trim()) return;
-    try { setState((await api('POST', '/members', { name })).state); } catch (err) { toast(err.message); }
+    await run(() => store.addMember(name));
   },
   'rename-member'(el) {
-    const m = member(Number(el.dataset.id));
+    const m = member(el.dataset.id);
     const name = prompt('New name', m.name);
-    if (name?.trim() && name.trim() !== m.name) mutate('PUT', `/members/${m.id}`, { name });
+    if (name?.trim() && name.trim() !== m.name) run(() => store.renameMember(m.id, name));
   },
   'remove-member'(el) {
-    const m = member(Number(el.dataset.id));
-    if (confirm(`Remove ${m.name} from the flat? Their turns pass to the others.`)) mutate('DELETE', `/members/${m.id}`);
+    const m = member(el.dataset.id);
+    if (confirm(`Remove ${m.name} from the flat? Their turns pass to the others.`)) run(() => store.removeMember(m.id));
   },
   'set-reward'() {
     const month = todayStr().slice(0, 7);
     const current = rewardFor(month);
     const text = prompt(`What does the winner of ${monthName(month)} get?\n(e.g. "Picks the next movie night" or "Dinner cooked by the others")`, current);
-    if (text != null && text.trim() !== current) mutate('PUT', '/reward', { month, text });
+    if (text != null && text.trim() !== current) run(() => store.setReward(month, text));
   },
   'rename-flat'() {
     const name = prompt('Flat name', state.flat.name);
-    if (name?.trim() && name.trim() !== state.flat.name) mutate('PUT', '/flat', { name });
+    if (name?.trim() && name.trim() !== state.flat.name) run(() => store.renameFlat(name));
   },
-  switch() { ui.joining = { code: session.code }; setSession(null, true); render(); },
+  switch() { dropDevice(); ui.joining = { code: session.code }; setSession(null, true); render(); },
+
+  async 'push-on'(el) {
+    el.disabled = true;
+    try {
+      await registerDevice();
+      toast('Reminders are on for this device');
+    } catch (err) {
+      toast(friendly(err));
+    }
+    render();
+  },
+  async 'push-off'() {
+    dropDevice();
+    setDevice({ ...device, on: false });
+    render();
+    const { disable } = await import('./push.js');
+    disable().catch(() => {});
+  },
+  'push-later'() { setDevice({ ...device, nudged: true }); render(); },
   leave() {
     if (!confirm('Sign out of this flat on this device? You can rejoin with the invite code.')) return;
+    dropDevice();
     setSession(null);
     render();
   },
@@ -604,26 +662,25 @@ async function copy(text, message) {
 
 const forms = {
   async create(data) {
-    const res = await api('POST', '/flats', { name: data.get('name'), member_name: data.get('member_name') }, null);
-    setSession({ code: res.state.flat.code, memberId: res.member_id }, true);
+    const { code, memberId } = await store.createFlat(data.get('name'), data.get('member_name'));
+    setSession({ code, memberId });
     ui.setup = true;
-    setState(res.state);
+    follow(code);
   },
   join: (data) => lookUpFlat(data.get('code')),
   async 'new-member'(data) {
-    const res = await api('POST', '/members', { name: data.get('name') }, ui.joining.code);
-    setSession({ code: ui.joining.code, memberId: res.member_id }, true);
+    const memberId = await store.addMember(data.get('name'));
+    setSession({ code: ui.joining.code, memberId }, true);
     ui.joining = null;
-    setState(res.state);
+    render();
   },
   async setup(data) {
     const today = todayStr();
-    const picked = data.getAll('t').map((i) => TEMPLATES[i]);
-    for (const [i, t] of picked.entries()) {
-      // Spread first due dates over the coming days so not everything lands at once.
-      const { on, ...fields } = t;
-      setState(await api('POST', '/chores', { ...fields, assign_mode: 'all', next_due: addDays(today, i % 7) }));
-    }
+    // Spread first due dates over the coming days so not everything lands at once.
+    await store.addChores(data.getAll('t').map((t, i) => {
+      const { on, ...fields } = TEMPLATES[t];
+      return { ...fields, assign_mode: 'all', next_due: addDays(today, i % 7) };
+    }));
     ui.setup = false;
     render();
   },
@@ -639,12 +696,12 @@ const forms = {
       interval_unit: data.get('interval_unit'),
       points: Number(data.get('points')),
       assign_mode: data.get('assign_mode'),
-      rotation: data.getAll('rotation').map(Number),
-      assignee_id: data.get('assignee_id') ? Number(data.get('assignee_id')) : null,
+      rotation: data.getAll('rotation'),
+      assignee_id: data.get('assignee_id') || null,
       next_due: data.get('next_due'),
     };
     const id = form.dataset.id;
-    setState(await api(id ? 'PUT' : 'POST', id ? `/chores/${id}` : '/chores', body));
+    await (id ? store.updateChore(id, body) : store.addChores([body]));
     sheet.close();
   },
 };
@@ -664,7 +721,7 @@ document.addEventListener('submit', async (e) => {
   try {
     await forms[form.dataset.form](new FormData(form), form);
   } catch (err) {
-    toast(err.message);
+    toast(friendly(err));
   } finally {
     if (button) button.disabled = false;
   }
@@ -678,18 +735,29 @@ document.addEventListener('change', (e) => {
 
 // ---------- start ----------
 
-render();
-
-const invite = new URLSearchParams(location.hash.slice(1)).get('join');
-if (invite) {
-  history.replaceState(null, '', location.pathname);
-  const code = invite.replace(/[^a-z0-9]/gi, '').toUpperCase();
-  if (code !== session?.code) lookUpFlat(code);
-}
-
-refresh();
-setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
-window.addEventListener('online', refresh);
-
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+
+if (!store.configured) {
+  app.innerHTML = setupNotice();
+} else {
+  render();
+  // Invite links look like https://host/#join=CODE.
+  const readInvite = () => {
+    const invite = new URLSearchParams(location.hash.slice(1)).get('join');
+    if (!invite) return;
+    history.replaceState(null, '', location.pathname);
+    if (store.normalizeCode(invite) !== session?.code) lookUpFlat(invite);
+  };
+  if (session) {
+    follow(session.code);
+    syncDevice();
+  }
+  readInvite();
+  window.addEventListener('hashchange', readInvite);
+
+  const connection = () => { ui.offline = !navigator.onLine; render(); };
+  window.addEventListener('online', connection);
+  window.addEventListener('offline', connection);
+  // Due labels depend on today's date: refresh when the app comes back to the front.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !sheet.open) render(); });
+}
