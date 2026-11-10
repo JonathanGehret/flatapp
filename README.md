@@ -46,8 +46,9 @@ You need a Firebase account and [Node.js](https://nodejs.org).
 3. **Project settings → General → Your apps → Web (`</>`).** Register an app
    (no need to tick Hosting) and copy the `firebaseConfig` values into
    [`web/firebase-config.js`](web/firebase-config.js).
-4. **Project settings → Cloud Messaging → Web Push certificates → Generate key
-   pair.** Copy the key into `vapidKey` in the same file.
+4. Optional: **Project settings → Cloud Messaging → Web Push certificates →
+   Generate key pair**, and copy the key into `vapidKey` in the same file.
+   Without it, Firebase's default web push key is used.
 
 These values are not secrets; commit them.
 
@@ -72,9 +73,10 @@ command again after any change to `web/` or `firestore.rules`.
 3. Test it: **Actions → Chore reminders → Run workflow.**
 
 The workflow in
-[`.github/workflows/reminders.yml`](.github/workflows/reminders.yml) runs at
-07:00 and 17:00 UTC; change the two `cron` lines to suit your flat. Things to
-know:
+[`.github/workflows/reminders.yml`](.github/workflows/reminders.yml) sends at
+08:00 and 18:00 Berlin time, all year. Change `REMINDER_TZ` and
+`REMINDER_HOURS` there to suit your flat (and the `cron` hours, which must
+cover those times in UTC). Things to know:
 
 - GitHub only runs schedules from the repository's default branch, and may
   start them some minutes late.
