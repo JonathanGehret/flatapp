@@ -1,7 +1,7 @@
 // App-shell cache: network first so deploys show up at once, cache as the
 // offline fallback. API calls are never cached here; the app keeps its own
 // copy of the last known state.
-const CACHE = 'flatapp-shell-v1';
+const CACHE = 'flatapp-shell-v2';
 const SHELL = ['./', 'style.css', 'app.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png'];
 
 self.addEventListener('install', (e) => {

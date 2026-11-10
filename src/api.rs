@@ -67,6 +67,12 @@ CREATE TABLE IF NOT EXISTS completions (
     prev_due TEXT NOT NULL,               -- chore state before this entry, for undo
     prev_assignee INTEGER
 );
+CREATE TABLE IF NOT EXISTS rewards (
+    flat_id INTEGER NOT NULL REFERENCES flats(id),
+    month TEXT NOT NULL,                  -- YYYY-MM
+    text TEXT NOT NULL,                   -- empty = explicitly no prize
+    PRIMARY KEY (flat_id, month)
+);
 CREATE INDEX IF NOT EXISTS idx_members_flat ON members(flat_id);
 CREATE INDEX IF NOT EXISTS idx_chores_flat ON chores(flat_id);
 CREATE INDEX IF NOT EXISTS idx_completions_flat ON completions(flat_id, id);
@@ -86,6 +92,7 @@ pub fn router(state: Shared) -> Router {
         .route("/flats", post(create_flat))
         .route("/state", get(get_state))
         .route("/flat", put(update_flat))
+        .route("/reward", put(set_reward))
         .route("/members", post(add_member))
         .route("/members/{id}", put(rename_member).delete(remove_member))
         .route("/chores", post(create_chore))
@@ -338,18 +345,30 @@ fn load_state(c: &Connection, flat: i64) -> Result<Json<Value>, ApiError> {
         })?
         .collect::<rusqlite::Result<_>>()?;
 
-    let since = (Utc::now().date_naive() - Days::new(30)).format(DATE_FMT).to_string();
+    // Points per calendar month for the past year. The client decides which
+    // month is "this month" from its own clock.
+    let since = (Utc::now().date_naive() - Days::new(400)).format(DATE_FMT).to_string();
     let scores: Vec<Value> = c
         .prepare(
-            "SELECT member_id, SUM(points), COUNT(*) FROM completions
-             WHERE flat_id = ?1 AND kind = 'done' AND date >= ?2 GROUP BY member_id",
+            "SELECT substr(date, 1, 7) AS month, member_id, SUM(points), COUNT(*)
+             FROM completions
+             WHERE flat_id = ?1 AND kind = 'done' AND date >= ?2
+             GROUP BY month, member_id ORDER BY month DESC",
         )?
         .query_map(params![flat, since], |r| {
             Ok(json!({
-                "member_id": r.get::<_, i64>(0)?,
-                "points": r.get::<_, i64>(1)?,
-                "count": r.get::<_, i64>(2)?,
+                "month": r.get::<_, String>(0)?,
+                "member_id": r.get::<_, i64>(1)?,
+                "points": r.get::<_, i64>(2)?,
+                "count": r.get::<_, i64>(3)?,
             }))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
+    let rewards: Vec<Value> = c
+        .prepare("SELECT month, text FROM rewards WHERE flat_id = ?1 ORDER BY month DESC LIMIT 36")?
+        .query_map([flat], |r| {
+            Ok(json!({ "month": r.get::<_, String>(0)?, "text": r.get::<_, String>(1)? }))
         })?
         .collect::<rusqlite::Result<_>>()?;
 
@@ -359,6 +378,7 @@ fn load_state(c: &Connection, flat: i64) -> Result<Json<Value>, ApiError> {
         "chores": chores,
         "activity": activity,
         "scores": scores,
+        "rewards": rewards,
     })))
 }
 
@@ -408,6 +428,36 @@ async fn update_flat(
     let c = db.lock().unwrap();
     let flat = auth(&c, &headers)?;
     c.execute("UPDATE flats SET name = ?1 WHERE id = ?2", params![clean_name(&body.name, 40)?, flat])?;
+    load_state(&c, flat)
+}
+
+#[derive(Deserialize)]
+struct RewardBody {
+    month: String,
+    text: String,
+}
+
+/// The prize the flat plays for in a given month. A month without its own
+/// entry inherits the most recent earlier one (the client resolves that).
+async fn set_reward(
+    State(db): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<RewardBody>,
+) -> ApiResult {
+    let c = db.lock().unwrap();
+    let flat = auth(&c, &headers)?;
+    if body.month.len() != 7 || parse_date(&format!("{}-01", body.month)).is_none() {
+        return Err(ApiError::BadRequest("Invalid month"));
+    }
+    let text = body.text.trim();
+    if text.chars().count() > 120 {
+        return Err(ApiError::BadRequest("Keep the prize under 120 characters"));
+    }
+    c.execute(
+        "INSERT INTO rewards (flat_id, month, text) VALUES (?1, ?2, ?3)
+         ON CONFLICT (flat_id, month) DO UPDATE SET text = excluded.text",
+        params![flat, body.month, text],
+    )?;
     load_state(&c, flat)
 }
 

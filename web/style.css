@@ -139,6 +139,13 @@ main { flex: 1; padding: 4px 16px calc(150px + env(safe-area-inset-bottom)); }
 
 .bar { height: 8px; background: var(--line); border-radius: 4px; margin-top: 6px; overflow: hidden; }
 .bar i { display: block; height: 100%; border-radius: 4px; }
+.gain { color: var(--accent); font-weight: 650; }
+.winner {
+  display: flex; align-items: center; gap: 14px; margin-top: 12px; padding: 14px 16px;
+  border-radius: var(--radius); background: var(--accent-soft); color: var(--text);
+}
+.winner .big { font-size: 34px; line-height: 1; }
+.winner b { display: block; }
 .pts { font-weight: 700; font-variant-numeric: tabular-nums; }
 
 .code {

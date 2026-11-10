@@ -1,0 +1,15 @@
+# Render blueprint: New -> Blueprint -> pick this repository.
+# The disk keeps the SQLite database across deploys; disks need a paid plan.
+services:
+  - type: web
+    name: flatapp
+    runtime: docker
+    plan: starter
+    healthCheckPath: /
+    envVars:
+      - key: DATABASE_PATH
+        value: /data/flatapp.db
+    disk:
+      name: flatapp-data
+      mountPath: /data
+      sizeGB: 1

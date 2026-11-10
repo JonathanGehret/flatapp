@@ -8,7 +8,10 @@ and who has been doing how much.
   "whoever gets to it". The turn moves on when a chore is done.
 - **To-do view** per person, grouped into overdue, today, next 7 days, later.
 - **Pass on** a turn, **undo** a mistake, or log a chore for someone else.
-- **Scores**: effort points over the last 30 days, plus an activity log.
+- **Points**: quick chores earn 1 point, medium 2, big 3.
+- **Monthly prize**: the flat writes down a reward ("dinner cooked by the
+  others"); whoever has the most points at the end of the month wins it. The
+  winner is announced in the app and past winners are kept.
 - **No accounts**: a flat is shared with an invite link or code.
 - **Installable** on iPhone and Android as a PWA; opens offline with the last
   known state.
@@ -50,8 +53,14 @@ requires HTTPS. Any of these work:
       reverse_proxy localhost:8080
   }
   ```
-- **A container host** (Fly.io, Railway, ...) using the included `Dockerfile`.
+- **Render**: the included `render.yaml` blueprint builds the `Dockerfile` and
+  attaches a persistent disk for the database. In Render choose New → Blueprint
+  and pick this repository.
+- **Another container host** (Fly.io, Railway, ...) using the `Dockerfile`.
   Mount a persistent volume at `/data`; the database lives there.
+
+The host must keep a disk between restarts. Without one, the database is wiped
+on every deploy.
 
   ```sh
   docker build -t flatapp .

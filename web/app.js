@@ -236,7 +236,7 @@ function choreCard(c) {
       <span class="icon">${esc(c.icon)}</span>
       <span class="body">
         <span class="title">${esc(c.title)}</span>
-        <span class="meta"><span class="${due.cls}">${esc(due.text)}</span>·${avatar(who, 'sm')}<span>${who ? (mine ? 'You' : esc(who.name)) : 'Anyone'}</span></span>
+        <span class="meta"><span class="${due.cls}">${esc(due.text)}</span>·${avatar(who, 'sm')}<span>${who ? (mine ? 'You' : esc(who.name)) : 'Anyone'}</span>·<span class="gain">+${c.points}</span></span>
       </span>
     </button>
     <button class="check" data-action="done" data-id="${c.id}" aria-label="Mark ${esc(c.title)} done">✓</button>
@@ -283,27 +283,68 @@ function choresView() {
     </button>`).join('');
 }
 
+// ---------- monthly race ----------
+
+const prevMonth = (m) => { const [y, mo] = m.split('-').map(Number); return mo === 1 ? `${y - 1}-12` : `${y}-${pad(mo - 1)}`; };
+function monthName(m) {
+  const [y, mo] = m.split('-').map(Number);
+  const sameYear = y === new Date().getFullYear();
+  return new Date(y, mo - 1, 1).toLocaleDateString(undefined, sameYear ? { month: 'long' } : { month: 'long', year: 'numeric' });
+}
+/** A month plays for its own prize, or else the most recent one set before it. */
+const rewardFor = (month) => state.rewards.find((r) => r.month <= month)?.text ?? '';
+const boardFor = (month) => state.scores.filter((s) => s.month === month);
+function winnersOf(month) {
+  const board = boardFor(month);
+  const top = Math.max(0, ...board.map((s) => s.points));
+  return top ? { points: top, members: board.filter((s) => s.points === top).map((s) => member(s.member_id)).filter(Boolean) } : null;
+}
+const names = (members) => members.map((m) => esc(m.name)).join(' & ');
+
 function scoresView() {
-  const rows = activeMembers().map((m) => {
-    const s = state.scores.find((x) => x.member_id === m.id);
+  const today = todayStr();
+  const month = today.slice(0, 7);
+  const last = prevMonth(month);
+  const board = boardFor(month);
+  // Everyone in the flat, plus anyone who scored this month before leaving.
+  const rows = state.members.filter((m) => m.active || board.some((s) => s.member_id === m.id)).map((m) => {
+    const s = board.find((x) => x.member_id === m.id);
     return { m, points: s?.points ?? 0, count: s?.count ?? 0 };
   }).sort((a, b) => b.points - a.points);
   const max = Math.max(1, ...rows.map((r) => r.points));
-  const today = todayStr();
+  const leading = rows[0]?.points ?? 0;
+  const [y, mo] = month.split('-').map(Number);
+  const daysLeft = new Date(y, mo, 0).getDate() - toDate(today).getDate();
+  const prize = rewardFor(month);
+  const lastWin = winnersOf(last);
+  const lastPrize = rewardFor(last);
+  const earlier = [...new Set(state.scores.map((s) => s.month))].filter((m) => m < last);
   const when = (date) => {
     const d = diffDays(today, date);
     return d <= 0 ? 'Today' : d === 1 ? 'Yesterday' : shortDate(date);
   };
-  return `<div class="section"><h2>Last 30 days</h2></div>
-  <div class="panel">${rows.map((r) => `<div class="row">
+
+  return `${lastWin ? `<div class="winner">
+      <div class="big">🏆</div>
+      <div><b>${names(lastWin.members)} won ${monthName(last)}</b>
+      <div>${lastWin.points} points${lastPrize ? ` · Prize: ${esc(lastPrize)}` : ''}</div></div>
+    </div>` : ''}
+  <div class="section"><h2>${monthName(month)}</h2><small>${daysLeft ? `${plural(daysLeft, 'day')} left` : 'last day'}</small></div>
+  <div class="panel">
+    <div class="row">
+      <span class="icon">🎁</span>
+      <div class="grow"><div class="sub">Prize for the most points</div><div>${prize ? esc(prize) : 'No prize set yet'}</div></div>
+      <button class="link" data-action="set-reward">${prize ? 'Change' : 'Set a prize'}</button>
+    </div>
+    ${rows.map((r) => `<div class="row">
       ${avatar(r.m)}
       <div class="grow">
-        <div>${esc(r.m.name)}</div>
+        <div>${esc(r.m.name)}${r.points && r.points === leading ? ' 👑' : ''}</div>
         <div class="bar"><i style="width:${(r.points / max) * 100}%;background:${esc(r.m.color)}"></i></div>
       </div>
       <div style="text-align:right"><div class="pts">${r.points}</div><div class="sub">${plural(r.count, 'chore')}</div></div>
     </div>`).join('')}</div>
-  <p class="hint" style="margin-top:8px">Points: quick chore 1, medium 2, big 3.</p>
+  <p class="hint" style="margin-top:8px">Quick chores earn 1 point, medium 2, big 3. Whoever has the most at the end of the month wins the prize.</p>
   <div class="section"><h2>Activity</h2></div>
   ${state.activity.length ? `<div class="panel">${state.activity.map((a) => `<div class="row">
       <span class="icon">${esc(a.icon)}</span>
@@ -312,7 +353,17 @@ function scoresView() {
         <div class="sub">${when(a.date)}${a.kind === 'done' ? ` · +${a.points}` : ''}</div>
       </div>
       ${a.undoable ? `<button class="link" data-action="undo" data-id="${a.id}">Undo</button>` : ''}
-    </div>`).join('')}</div>` : `<p class="hint">Finished chores show up here.</p>`}`;
+    </div>`).join('')}</div>` : `<p class="hint">Finished chores show up here.</p>`}
+  ${earlier.length ? `<div class="section"><h2>Past winners</h2></div>
+  <div class="panel">${earlier.map((m) => {
+    const w = winnersOf(m);
+    const p = rewardFor(m);
+    return w ? `<div class="row">
+      ${avatar(w.members[0])}
+      <div class="grow"><div><b>${names(w.members)}</b> · ${monthName(m)}</div>
+      <div class="sub">${w.points} points${p ? ` · ${esc(p)}` : ''}</div></div>
+    </div>` : '';
+  }).join('')}</div>` : ''}`;
 }
 
 function flatView() {
@@ -523,6 +574,12 @@ const actions = {
   'remove-member'(el) {
     const m = member(Number(el.dataset.id));
     if (confirm(`Remove ${m.name} from the flat? Their turns pass to the others.`)) mutate('DELETE', `/members/${m.id}`);
+  },
+  'set-reward'() {
+    const month = todayStr().slice(0, 7);
+    const current = rewardFor(month);
+    const text = prompt(`What does the winner of ${monthName(month)} get?\n(e.g. "Picks the next movie night" or "Dinner cooked by the others")`, current);
+    if (text != null && text.trim() !== current) mutate('PUT', '/reward', { month, text });
   },
   'rename-flat'() {
     const name = prompt('Flat name', state.flat.name);
