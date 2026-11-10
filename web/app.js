@@ -2,7 +2,6 @@
 // a pure render of it.
 
 import * as store from './store.js';
-import { vapidKey } from './firebase-config.js';
 import { fmt, toDate } from './schedule.js';
 
 const LS_SESSION = 'flatapp.session';
@@ -164,7 +163,7 @@ async function lookUpFlat(rawCode) {
 
 // ---------- reminders ----------
 
-const pushAvailable = () => Boolean(vapidKey) && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const pushAvailable = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 const pushOn = () => Boolean(device?.on) && pushAvailable() && Notification.permission === 'granted';
 const setDevice = (next) => { device = next; write(LS_DEVICE, device); };
 
@@ -408,13 +407,13 @@ function flatView() {
       <button class="btn ghost" data-action="copy">Copy code</button>
     </div>
   </div>
-  ${vapidKey ? `<div class="section"><h2>Reminders</h2></div>
+  ${`<div class="section"><h2>Reminders</h2></div>
   <div class="panel">${pushAvailable() ? `<div class="row">
       <span class="icon">🔔</span>
       <div class="grow">Notify this device when my chores are due<div class="sub">${pushOn() ? 'On' : 'Off'}</div></div>
       <button class="link" data-action="${pushOn() ? 'push-off' : 'push-on'}">${pushOn() ? 'Turn off' : 'Turn on'}</button>
     </div>` : `<div class="row"><div class="grow sub">Notifications are not available here. On iPhone, first add the app to your home screen (Safari → Share → Add to Home Screen), then open it from there.</div></div>`}
-  </div>` : ''}
+  </div>`}
   <div class="section"><h2>People</h2></div>
   <div class="panel">
     ${activeMembers().map((m) => `<div class="row">

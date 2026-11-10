@@ -14,7 +14,8 @@ export async function enable() {
       : 'Notifications were not allowed.');
   }
   const registration = await navigator.serviceWorker.ready;
-  return getToken(getMessaging(app), { vapidKey, serviceWorkerRegistration: registration });
+  // Without a key of our own, the SDK falls back to Firebase's default key pair.
+  return getToken(getMessaging(app), { ...(vapidKey ? { vapidKey } : {}), serviceWorkerRegistration: registration });
 }
 
 export async function disable() {

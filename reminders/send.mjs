@@ -3,6 +3,9 @@
 //
 //   FIREBASE_SERVICE_ACCOUNT  service account key (JSON) of the Firebase project
 //   DRY_RUN=1                 print what would be sent instead of sending
+//   SCHEDULE                  the cron line that started this run, if any
+//   REMINDER_TZ               time zone of the reminder hours (default Europe/Berlin)
+//   REMINDER_HOURS            local hours to send at (default 8,18)
 //
 // With FIRESTORE_EMULATOR_HOST set it talks to the local emulator instead.
 
@@ -28,6 +31,23 @@ const db = getFirestore();
 const DEAD_TOKEN = new Set(['messaging/registration-token-not-registered', 'messaging/invalid-registration-token']);
 
 const now = new Date();
+
+// GitHub's cron is in UTC and knows no daylight saving time, so the workflow
+// fires at every UTC hour that can be a reminder hour, and this check keeps
+// only the ones that are. It goes by the scheduled hour, not the actual start
+// time, because GitHub may start runs late. Manual runs always send.
+const schedule = process.env.SCHEDULE;
+if (schedule) {
+  const timeZone = process.env.REMINDER_TZ || 'Europe/Berlin';
+  const hours = (process.env.REMINDER_HOURS || '8,18').split(',').map(Number);
+  const planned = new Date(now);
+  planned.setUTCHours(Number(schedule.split(' ')[1]), 0, 0, 0);
+  const localHour = Number(new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', hourCycle: 'h23' }).format(planned));
+  if (!hours.includes(localHour)) {
+    console.log(`Scheduled for ${localHour}:00 in ${timeZone}, which is not a reminder hour. Nothing to do.`);
+    process.exit(0);
+  }
+}
 let sent = 0;
 let failed = 0;
 let removed = 0;

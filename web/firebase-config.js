@@ -3,14 +3,15 @@
 //
 // Firebase console → Project settings → Your apps → Web app → "Config".
 export const firebaseConfig = {
-  apiKey: '',
-  authDomain: '',
-  projectId: '',
-  storageBucket: '',
-  messagingSenderId: '',
-  appId: '',
+  apiKey: 'AIzaSyDS_SXUvKe2uJ_jCfqluTWPgFuNz5q9w_Q',
+  authDomain: 'flatapp-jgehret.firebaseapp.com',
+  projectId: 'flatapp-jgehret',
+  storageBucket: 'flatapp-jgehret.firebasestorage.app',
+  messagingSenderId: '675097243146',
+  appId: '1:675097243146:web:fcd697565a6db6eba979f3',
 };
 
-// Firebase console → Project settings → Cloud Messaging → Web Push
-// certificates → "Key pair". Needed for reminders; leave empty to disable them.
+// Optional. Leave empty to use Firebase's default web push key. To use your
+// own: Firebase console → Project settings → Cloud Messaging → Web Push
+// certificates → "Key pair". Changing it later invalidates existing tokens.
 export const vapidKey = '';
