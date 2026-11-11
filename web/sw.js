@@ -1,10 +1,10 @@
 // App-shell cache: network first so deploys show up at once, cache as the
 // offline fallback. Flat data is not handled here; Firestore keeps its own
 // offline copy.
-const CACHE = 'flatapp-shell-v3';
+const CACHE = 'flatapp-shell-v4';
 const SHELL = [
   './', 'style.css', 'app.js', 'store.js', 'schedule.js', 'push.js', 'firebase-config.js',
-  'vendor/firebase-app.js', 'vendor/firebase-firestore.js',
+  'vendor/firebase-app.js', 'vendor/firebase-firestore.js', 'vendor/qrcode.mjs',
   'manifest.webmanifest', 'icon.svg', 'icon-192.png',
 ];
 

@@ -3,16 +3,15 @@
 //
 //   FIREBASE_SERVICE_ACCOUNT  service account key (JSON) of the Firebase project
 //   DRY_RUN=1                 print what would be sent instead of sending
-//   SCHEDULE                  the cron line that started this run, if any
-//   REMINDER_TZ               time zone of the reminder hours (default Europe/Berlin)
-//   REMINDER_HOURS            local hours to send at (default 8,18)
+//   SCHEDULE                  set for scheduled runs: only remind people whose
+//                             chosen hours include the current hour
 //
 // With FIRESTORE_EMULATOR_HOST set it talks to the local emulator instead.
 
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
-import { buildDigests, localDate } from './digest.mjs';
+import { buildDigests, localDate, localHour } from './digest.mjs';
 
 const dryRun = process.env.DRY_RUN === '1';
 const emulator = Boolean(process.env.FIRESTORE_EMULATOR_HOST);
@@ -32,22 +31,14 @@ const DEAD_TOKEN = new Set(['messaging/registration-token-not-registered', 'mess
 
 const now = new Date();
 
-// GitHub's cron is in UTC and knows no daylight saving time, so the workflow
-// fires at every UTC hour that can be a reminder hour, and this check keeps
-// only the ones that are. It goes by the scheduled hour, not the actual start
-// time, because GitHub may start runs late. Manual runs always send.
-const schedule = process.env.SCHEDULE;
-if (schedule) {
-  const timeZone = process.env.REMINDER_TZ || 'Europe/Berlin';
-  const hours = (process.env.REMINDER_HOURS || '8,18').split(',').map(Number);
-  const planned = new Date(now);
-  planned.setUTCHours(Number(schedule.split(' ')[1]), 0, 0, 0);
-  const localHour = Number(new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', hourCycle: 'h23' }).format(planned));
-  if (!hours.includes(localHour)) {
-    console.log(`Scheduled for ${localHour}:00 in ${timeZone}, which is not a reminder hour. Nothing to do.`);
-    process.exit(0);
-  }
-}
+// Scheduled runs happen every hour; each flatmate is reminded at the hours
+// they picked, in the flat's time zone. GitHub may start a run some minutes
+// late, so the hour is taken from when the run actually starts, and each flat
+// remembers the last hour it was handled for, so a run that slips into the
+// next hour cannot remind anyone twice. Manual runs remind everyone,
+// whatever their hours.
+const scheduled = Boolean(process.env.SCHEDULE);
+
 let sent = 0;
 let failed = 0;
 let removed = 0;
@@ -55,7 +46,16 @@ let removed = 0;
 const flats = await db.collection('flats').get();
 for (const flatDoc of flats.docs) {
   const flat = flatDoc.data();
-  const digests = buildDigests(flat, localDate(now, flat.tz));
+  const today = localDate(now, flat.tz);
+  const hour = scheduled ? localHour(now, flat.tz) : null;
+  if (scheduled && !dryRun) {
+    // Not readable or writable by the app: firestore.rules has no rule for it.
+    const marker = flatDoc.ref.collection('private').doc('reminders');
+    const slot = `${today}T${String(hour).padStart(2, '0')}`;
+    if ((await marker.get()).data()?.last === slot) continue;
+    await marker.set({ last: slot });
+  }
+  const digests = buildDigests(flat, today, hour);
   if (!digests.length) continue;
 
   const devices = (await flatDoc.ref.collection('devices').get()).docs;

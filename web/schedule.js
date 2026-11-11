@@ -33,3 +33,21 @@ export function nextInRotation(rotation, current) {
   const i = rotation.indexOf(current);
   return i < 0 ? rotation[0] : rotation[(i + 1) % rotation.length];
 }
+
+// ---------- reminder preferences ----------
+// Stored per member as `members.<id>.remind`; shared with the reminder job,
+// which imports this file.
+
+export const REMINDER_HOURS = Array.from({ length: 18 }, (_, i) => i + 6); // 06:00 to 23:00
+export const REMIND_DEFAULTS = Object.freeze({ hours: [8, 18], overdue_only: false, open: true, muted: [] });
+
+/** A member's reminder preferences, with defaults for anything not set. */
+export function remindPrefs(member) {
+  const r = member?.remind ?? {};
+  return {
+    hours: Array.isArray(r.hours) ? r.hours.filter((h) => REMINDER_HOURS.includes(h)) : [...REMIND_DEFAULTS.hours],
+    overdue_only: Boolean(r.overdue_only),
+    open: r.open ?? REMIND_DEFAULTS.open,
+    muted: Array.isArray(r.muted) ? r.muted : [],
+  };
+}

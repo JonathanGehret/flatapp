@@ -18,7 +18,7 @@ import {
   writeBatch, FieldPath, increment, deleteField,
 } from './vendor/firebase-firestore.js';
 import { firebaseConfig } from './firebase-config.js';
-import { isDate, nextDue, nextInRotation } from './schedule.js';
+import { isDate, nextDue, nextInRotation, remindPrefs, REMINDER_HOURS } from './schedule.js';
 
 export const configured = Boolean(firebaseConfig.projectId);
 
@@ -80,7 +80,7 @@ function toState() {
   // Only the newest entry of a chore can be undone: older ones no longer
   // describe the chore's previous state.
   const activity = log.map((e) => ({ ...e, undoable: data.chores?.[e.chore_id]?.last_log === e.id }));
-  return { flat: { name: data.name, code }, members, chores, scores, rewards, activity };
+  return { flat: { name: data.name, code, tz: data.tz }, members, chores, scores, rewards, activity };
 }
 
 function emit() {
@@ -241,6 +241,16 @@ export async function removeMember(id) {
     }
   }
   await write(pairs);
+}
+
+/** Saves a member's reminder preferences (hours, overdue_only, open, muted). */
+export function setRemindPrefs(memberId, changes) {
+  const m = data.members[memberId] ?? fail('Unknown member');
+  const next = { ...remindPrefs(m), ...changes };
+  next.hours = [...new Set(next.hours)].filter((h) => REMINDER_HOURS.includes(h)).sort((a, b) => a - b);
+  // Forget muted chores that no longer exist.
+  next.muted = [...new Set(next.muted)].filter((id) => data.chores?.[id]);
+  return write([[['members', memberId, 'remind'], next]]);
 }
 
 export const setReward = (month, text) => {

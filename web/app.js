@@ -2,7 +2,7 @@
 // a pure render of it.
 
 import * as store from './store.js';
-import { fmt, toDate } from './schedule.js';
+import { fmt, toDate, remindPrefs, REMINDER_HOURS } from './schedule.js';
 
 const LS_SESSION = 'flatapp.session';
 const LS_STATE = 'flatapp.state';
@@ -35,7 +35,7 @@ const write = (key, value) => {
 
 let session = read(LS_SESSION); // { code, memberId }
 let state = session ? read(LS_STATE) : null; // last known state, for an instant first paint
-let device = read(LS_DEVICE); // { id, on, nudged }: this device's reminder setting
+let device = read(LS_DEVICE); // { id, on, nudged, installHidden }: settings of this device
 // `joining` holds a flat we can see but have not picked a person in yet.
 const ui = { tab: 'tasks', filter: 'mine', offline: !navigator.onLine, joining: null, setup: false };
 
@@ -103,6 +103,18 @@ function setState(next) {
   lastRendered = json;
   state = next;
   write(LS_STATE, state);
+  // Opened through a personal link: sign in as that person if they are still in the flat.
+  if (!session && ui.joining?.memberId) {
+    const m = state.members.find((x) => x.id === ui.joining.memberId && x.active);
+    if (m) {
+      setSession({ code: ui.joining.code, memberId: m.id });
+      ui.joining = null;
+      toast(`Signed in as ${m.name}`);
+      syncDevice();
+    } else {
+      ui.joining.memberId = null;
+    }
+  }
   // Removed from the flat on another device: ask who is using this phone.
   if (session && !me()) {
     ui.joining = { code: session.code };
@@ -146,7 +158,8 @@ async function run(change) {
   }
 }
 
-async function lookUpFlat(rawCode) {
+/** Opens a flat by invite code. With `memberId` (a personal link), signs in as that person. */
+async function lookUpFlat(rawCode, memberId = null) {
   const code = store.normalizeCode(rawCode);
   if (!code) return;
   try {
@@ -156,7 +169,7 @@ async function lookUpFlat(rawCode) {
   }
   dropDevice();
   setSession(null); // switching flats: the old identity does not apply
-  ui.joining = { code };
+  ui.joining = { code, memberId };
   follow(code);
   render();
 }
@@ -184,6 +197,55 @@ function syncDevice() {
 /** Stops reminders for the person who was using this device. */
 function dropDevice() {
   if (session && device?.on) store.removeDevice(session.code, device.id).catch(() => {});
+}
+
+// ---------- installing & sharing ----------
+
+const standalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+let installEvent = null; // Chrome/Android's install prompt, kept for our own button
+
+const inviteLink = () => `${location.origin}/#join=${state.flat.code}`;
+/** Signs in as the current person on whatever device opens it. */
+const personalLink = () => `${location.origin}/#join=${session.code}&me=${session.memberId}`;
+
+async function qrSvg(text) {
+  const { qrcode } = await import('./vendor/qrcode.mjs');
+  const qr = qrcode(0, 'M');
+  qr.addData(text);
+  qr.make();
+  return qr.createSvgTag({ cellSize: 6, margin: 2, scalable: true, alt: 'QR code' });
+}
+
+async function qrSheet({ title, text, link, buttons }) {
+  openSheet(`
+    <div class="sheet-head"><h2>${esc(title)}</h2><button class="close" data-action="close" aria-label="Close">✕</button></div>
+    <div class="qr">${await qrSvg(link)}</div>
+    <p class="hint" style="text-align:center">${text}</p>
+    <div class="btns two">${buttons}</div>`);
+}
+
+/**
+ * iPhone keeps a home-screen app's storage apart from Safari's, so an app
+ * added from Safari would start signed out. Keeping the personal link in the
+ * address bar while in Safari makes the home-screen app open signed in.
+ */
+function keepSignInInAddress() {
+  if (!session || !isIOS() || standalone()) return;
+  const hash = `#join=${session.code}&me=${session.memberId}`;
+  if (location.hash !== hash) history.replaceState(null, '', location.pathname + hash);
+}
+
+function installCard() {
+  if (standalone() || device?.installHidden || !(installEvent || isIOS())) return '';
+  return `<div class="nudge">
+      <span class="icon">📲</span>
+      <div class="grow"><b>Install Flatapp</b><div class="sub">${installEvent
+        ? 'Open it from your home screen like any app.'
+        : 'Tap Share <span aria-hidden="true">⎙</span> in Safari, then <b>Add to Home Screen</b>. Needed for reminders.'}</div></div>
+      ${installEvent ? '<button class="link" data-action="install">Install</button>' : ''}
+      <button class="close" data-action="install-later" aria-label="Not now">✕</button>
+    </div>`;
 }
 
 function setupNotice() {
@@ -289,12 +351,13 @@ function tasksView() {
     if (!items.length) return '';
     return `<div class="section ${cls}"><h2>${name}</h2><small>${items.length}</small></div>${items.map(choreCard).join('')}`;
   }).join('');
-  const nudge = pushAvailable() && !device?.on && !device?.nudged ? `<div class="nudge">
+  const install = installCard();
+  const nudge = install || (pushAvailable() && !device?.on && !device?.nudged ? `<div class="nudge">
       <span class="icon">🔔</span>
       <div class="grow"><b>Get reminded</b><div class="sub">A notification when your chores are due.</div></div>
       <button class="link" data-action="push-on">Turn on</button>
       <button class="close" data-action="push-later" aria-label="Not now">✕</button>
-    </div>` : '';
+    </div>` : '');
   return filter + nudge + (html || `<div class="empty"><div class="big">🎉</div><b>Nothing on your plate</b>None of the chores are yours right now.</div>`);
 }
 
@@ -308,7 +371,7 @@ function choresView() {
       <span class="icon">${esc(c.icon)}</span>
       <span class="body">
         <span class="title">${esc(c.title)}</span>
-        <span class="meta">${intervalLabel(c)} · ${EFFORT[c.points]}</span>
+        <span class="meta">${intervalLabel(c)} · ${EFFORT[c.points]}${myPrefs().muted.includes(c.id) ? ' · <span title="No reminders for you">🔕</span>' : ''}</span>
       </span>
       ${c.rotation.length ? c.rotation.map((id) => avatar(member(id), 'sm')).join('') : avatar(null, 'sm')}
     </button>`).join('');
@@ -397,23 +460,53 @@ function scoresView() {
   }).join('')}</div>` : ''}`;
 }
 
+const myPrefs = () => remindPrefs(me());
+const tzName = () => (state.flat.tz ? state.flat.tz.split('/').pop().replace(/_/g, ' ') : '');
+
+function remindersPanel() {
+  const prefs = myPrefs();
+  const deviceRow = pushAvailable() ? `<div class="row">
+      <span class="icon">🔔</span>
+      <div class="grow">Notifications on this device<div class="sub">${pushOn() ? 'On' : 'Off'}</div></div>
+      <button class="link" data-action="${pushOn() ? 'push-off' : 'push-on'}">${pushOn() ? 'Turn off' : 'Turn on'}</button>
+    </div>` : `<div class="row"><div class="grow sub">Notifications are not available here.${isIOS() ? ' On iPhone, first add the app to your home screen (Safari → Share → Add to Home Screen), then open it from there.' : ''}</div></div>`;
+  const muted = prefs.muted.filter((id) => chore(id)).length;
+  return `<div class="section"><h2>Reminders</h2></div>
+  <div class="panel">
+    ${deviceRow}
+    <div class="row stack">
+      <div>When to remind me<div class="sub">${prefs.hours.length
+        ? `${prefs.hours.map((h) => `${pad(h)}:00`).join(', ')}${tzName() ? ` · ${esc(tzName())} time` : ''}`
+        : 'Never: pick at least one time'}</div></div>
+      <div class="hours">${REMINDER_HOURS.map((h) => `<button data-action="toggle-hour" data-hour="${h}" aria-pressed="${prefs.hours.includes(h)}">${pad(h)}</button>`).join('')}</div>
+    </div>
+    <label class="row check-row"><input type="checkbox" data-pref="overdue_only" ${prefs.overdue_only ? 'checked' : ''}>
+      <span class="grow">Only for overdue chores<span class="sub">Not on the day they are due</span></span></label>
+    <label class="row check-row"><input type="checkbox" data-pref="open" ${prefs.open ? 'checked' : ''}>
+      <span class="grow">Include chores anyone can do<span class="sub">The ones set to "whoever gets to it"</span></span></label>
+    <div class="row"><div class="grow sub">${muted ? `${plural(muted, 'chore')} muted for you.` : 'To mute a single chore, open it and turn off its reminder.'} These settings are yours and apply on all your devices.</div></div>
+  </div>`;
+}
+
 function flatView() {
+  const installRow = standalone()
+    ? ''
+    : installEvent
+      ? `<div class="row"><div class="grow">Install as an app</div><button class="link" data-action="install">Install</button></div>`
+      : `<div class="row"><div class="grow sub">Install as an app: ${isIOS() ? 'tap Share in Safari, then Add to Home Screen.' : 'open the browser menu and choose Install app or Add to Home screen.'}</div></div>`;
   return `<div class="section"><h2>Invite flatmates</h2></div>
   <div class="panel" style="padding-bottom:14px">
     <div class="code">${formatCode(state.flat.code)}</div>
     <p class="hint" style="text-align:center">Anyone with this code can see and edit the flat.</p>
-    <div class="btns two">
-      <button class="btn" data-action="share">Share link</button>
-      <button class="btn ghost" data-action="copy">Copy code</button>
+    <div class="btns">
+      <button class="btn" data-action="invite-qr">Show QR code</button>
+      <div class="btns two" style="margin:0">
+        <button class="btn ghost" data-action="share">Share link</button>
+        <button class="btn ghost" data-action="copy">Copy code</button>
+      </div>
     </div>
   </div>
-  ${`<div class="section"><h2>Reminders</h2></div>
-  <div class="panel">${pushAvailable() ? `<div class="row">
-      <span class="icon">🔔</span>
-      <div class="grow">Notify this device when my chores are due<div class="sub">${pushOn() ? 'On' : 'Off'}</div></div>
-      <button class="link" data-action="${pushOn() ? 'push-off' : 'push-on'}">${pushOn() ? 'Turn off' : 'Turn on'}</button>
-    </div>` : `<div class="row"><div class="grow sub">Notifications are not available here. On iPhone, first add the app to your home screen (Safari → Share → Add to Home Screen), then open it from there.</div></div>`}
-  </div>`}
+  ${remindersPanel()}
   <div class="section"><h2>People</h2></div>
   <div class="panel">
     ${activeMembers().map((m) => `<div class="row">
@@ -424,13 +517,18 @@ function flatView() {
     </div>`).join('')}
     <div class="row"><button class="link" data-action="add-member">+ Add someone without a phone</button></div>
   </div>
+  <div class="section"><h2>Your devices</h2></div>
+  <div class="panel">
+    <div class="row"><div class="grow">Use Flatapp on another phone or computer<div class="sub">Signs in there as you</div></div><button class="link" data-action="device-qr">Show</button></div>
+    ${installRow}
+  </div>
+  <p class="hint" style="margin-top:8px">Your flat is stored online, not on this phone. If you lose it, open the invite link or code on a new one and pick your name: everything is still there.</p>
   <div class="section"><h2>This flat</h2></div>
   <div class="panel">
     <div class="row"><div class="grow">${esc(state.flat.name)}</div><button class="link" data-action="rename-flat">Rename</button></div>
     <div class="row"><div class="grow">Using this device as someone else?</div><button class="link" data-action="switch">Switch</button></div>
     <div class="row"><div class="grow">Sign out on this device</div><button class="link danger" data-action="leave">Leave</button></div>
-  </div>
-  <p class="hint" style="margin-top:16px">Install as an app: on iPhone, open in Safari and choose Share → Add to Home Screen. On Android, open the browser menu and choose Install app.</p>`;
+  </div>`;
 }
 
 function mainScreen() {
@@ -451,6 +549,7 @@ function mainScreen() {
 }
 
 function render() {
+  keepSignInInAddress();
   if (session && state && me()) app.innerHTML = ui.setup ? setupScreen() : mainScreen();
   else if (ui.joining && state) app.innerHTML = pickerScreen();
   else app.innerHTML = welcomeScreen();
@@ -478,6 +577,8 @@ function detailSheet(id) {
         ? c.rotation.map((mid) => `<span class="chip ${mid === c.assignee_id ? 'turn' : ''}">${avatar(member(mid), 'sm')}${esc(member(mid)?.name)}</span>`).join('')
         : 'Whoever gets to it'}</dd></div>
     </dl>
+    <label class="choice" style="margin-top:12px"><input type="checkbox" data-mute="${c.id}" ${myPrefs().muted.includes(c.id) ? '' : 'checked'}>
+      <span>Remind me about this chore<small>Only changes your own notifications</small></span></label>
     <form data-form="complete" data-id="${c.id}">
       <label for="done-by">Done by</label>
       <select id="done-by" name="member_id">${people.map((m) => `<option value="${m.id}" ${m.id === session.memberId ? 'selected' : ''}>${esc(m.name)}${m.id === session.memberId ? ' (you)' : ''}</option>`).join('')}</select>
@@ -588,7 +689,7 @@ const actions = {
   'skip-setup'() { ui.setup = false; render(); },
 
   async share() {
-    const url = `${location.origin}/#join=${state.flat.code}`;
+    const url = inviteLink();
     const text = `Join "${state.flat.name}" on Flatapp`;
     if (navigator.share) {
       try { await navigator.share({ title: 'Flatapp', text, url }); } catch { /* cancelled */ }
@@ -642,6 +743,38 @@ const actions = {
     disable().catch(() => {});
   },
   'push-later'() { setDevice({ ...device, nudged: true }); render(); },
+
+  'toggle-hour'(el) {
+    const hour = Number(el.dataset.hour);
+    const { hours } = myPrefs();
+    run(() => store.setRemindPrefs(session.memberId, { hours: hours.includes(hour) ? hours.filter((h) => h !== hour) : [...hours, hour] }));
+  },
+  'invite-qr'() {
+    qrSheet({
+      title: `Join ${state.flat.name}`,
+      text: 'Point the phone camera at the code. It opens Flatapp, where they pick their name and can install the app right away.',
+      link: inviteLink(),
+      buttons: '<button class="btn ghost" data-action="share">Share link</button><button class="btn ghost" data-action="copy">Copy code</button>',
+    });
+  },
+  'device-qr'() {
+    qrSheet({
+      title: 'Use on another device',
+      text: `Scan with your other phone, or open the link there. It signs in as <b>${esc(me().name)}</b>, so keep it to yourself.`,
+      link: personalLink(),
+      buttons: '<button class="btn ghost" data-action="copy-personal">Copy link</button><button class="btn ghost" data-action="close">Done</button>',
+    });
+  },
+  'copy-personal': () => copy(personalLink(), 'Link copied'),
+  async install() {
+    if (!installEvent) return;
+    installEvent.prompt();
+    const { outcome } = await installEvent.userChoice;
+    installEvent = null;
+    if (outcome === 'accepted') toast('Installed. Open Flatapp from your home screen.');
+    render();
+  },
+  'install-later'() { setDevice({ ...device, installHidden: true }); render(); },
   leave() {
     if (!confirm('Sign out of this flat on this device? You can rejoin with the invite code.')) return;
     dropDevice();
@@ -727,6 +860,12 @@ document.addEventListener('submit', async (e) => {
 });
 
 document.addEventListener('change', (e) => {
+  const { pref, mute } = e.target.dataset;
+  if (pref) run(() => store.setRemindPrefs(session.memberId, { [pref]: e.target.checked }));
+  if (mute) {
+    const muted = myPrefs().muted.filter((id) => id !== mute);
+    run(() => store.setRemindPrefs(session.memberId, { muted: e.target.checked ? muted : [...muted, mute] }));
+  }
   if (e.target.name !== 'assign_mode') return;
   sheet.querySelector('#custom-people').hidden = e.target.value !== 'custom';
   sheet.querySelector('#turn-field').hidden = e.target.value === 'anyone';
@@ -741,11 +880,14 @@ if (!store.configured) {
 } else {
   render();
   // Invite links look like https://host/#join=CODE.
+  // Personal links add &me=MEMBER_ID and sign in as that person.
   const readInvite = () => {
-    const invite = new URLSearchParams(location.hash.slice(1)).get('join');
+    const params = new URLSearchParams(location.hash.slice(1));
+    const invite = params.get('join');
     if (!invite) return;
     history.replaceState(null, '', location.pathname);
-    if (store.normalizeCode(invite) !== session?.code) lookUpFlat(invite);
+    if (store.normalizeCode(invite) !== session?.code) lookUpFlat(invite, params.get('me'));
+    keepSignInInAddress();
   };
   if (session) {
     follow(session.code);
@@ -753,6 +895,13 @@ if (!store.configured) {
   }
   readInvite();
   window.addEventListener('hashchange', readInvite);
+
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault(); // show our own Install button instead of the browser's banner
+    installEvent = e;
+    render();
+  });
+  window.addEventListener('appinstalled', () => { installEvent = null; render(); });
 
   const connection = () => { ui.offline = !navigator.onLine; render(); };
   window.addEventListener('online', connection);

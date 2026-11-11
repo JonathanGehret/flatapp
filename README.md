@@ -12,8 +12,11 @@ and who has been doing how much.
 - **Monthly prize**: the flat writes down a reward ("dinner cooked by the
   others"); whoever has the most points at the end of the month wins it. The
   winner is announced in the app and past winners are kept.
-- **Reminders**: a push notification in the morning and evening for chores
-  that are due or overdue.
+- **Reminders**: push notifications for chores that are due or overdue. Each
+  person picks their own times, can limit them to overdue chores, leave out
+  "whoever gets to it" chores, and mute single chores.
+- **QR codes**: one to invite flatmates, and a personal one to sign in on
+  another phone or computer.
 - **Live sync**: changes show up on everyone's phone within a second.
 - **Works offline**: changes made without a connection are sent later.
 - **No accounts**: a flat is shared with an invite link or code.
@@ -73,13 +76,16 @@ command again after any change to `web/` or `firestore.rules`.
 3. Test it: **Actions → Chore reminders → Run workflow.**
 
 The workflow in
-[`.github/workflows/reminders.yml`](.github/workflows/reminders.yml) sends at
-08:00 and 18:00 Berlin time, all year. Change `REMINDER_TZ` and
-`REMINDER_HOURS` there to suit your flat (and the `cron` hours, which must
-cover those times in UTC). Things to know:
+[`.github/workflows/reminders.yml`](.github/workflows/reminders.yml) runs every
+hour. Each person chooses their reminder times in the app (**Flat →
+Reminders**, 08:00 and 18:00 by default), in the time zone of the phone that
+created the flat. Things to know:
 
 - GitHub only runs schedules from the repository's default branch, and may
-  start them some minutes late.
+  start them some minutes late. Each flat remembers the last hour it was
+  handled for, so a late run never reminds anyone twice.
+- In a public repository, Actions minutes are free. In a private one, hourly
+  runs use roughly 720 of the 2,000 free minutes a month.
 - GitHub pauses schedules in repositories without activity for 60 days; a
   commit or pressing "Enable workflow" resumes them.
 - Each person turns reminders on for their own device in the app (**Flat →
@@ -96,7 +102,17 @@ cover those times in UTC). Things to know:
    app (iOS 16.4 or later), not from a Safari tab.
 
 Anyone with the invite code can view and edit the flat, so treat it like the
-flat's Wi-Fi password.
+flat's Wi-Fi password. **Flat → Show QR code** gives a code to scan instead.
+
+Nothing is lost with a phone: the flat lives in Firestore. On a new device,
+open the invite link (or enter the code) and pick your name. **Flat → Your
+devices** shows a personal link and QR code that signs in as you directly;
+keep it to yourself.
+
+On iPhone, an app added to the home screen does not share storage with
+Safari. While in Safari, the app therefore keeps the personal sign-in link in
+the address bar, and the manifest has no fixed `start_url`, so the home-screen
+app opens that address and starts signed in.
 
 ## How scheduling works
 
@@ -107,14 +123,17 @@ flat's Wi-Fi password.
 - Chores set to "everyone takes turns" pick up new flatmates automatically.
   When someone leaves, their turns pass to the next person.
 - Reminders go to the person whose turn it is, for chores due today or
-  earlier. Chores without turns are announced to everyone.
+  earlier, at the hours they picked. Chores without turns are announced to
+  everyone who has not switched them off. Muted chores are left out.
 
 ## Data and access
 
 ```
-flats/{code}               name, members, chores, prizes, monthly scores
-flats/{code}/log/{id}      one entry per finished or passed-on chore
-flats/{code}/devices/{id}  push tokens
+flats/{code}                  name, members (with reminder settings), chores,
+                              prizes, monthly scores
+flats/{code}/log/{id}         one entry per finished or passed-on chore
+flats/{code}/devices/{id}     push tokens
+flats/{code}/private/reminders  last hour the reminder job handled
 ```
 
 The invite code is the document id. [`firestore.rules`](firestore.rules) lets
@@ -132,7 +151,7 @@ npm run dev              # app on http://127.0.0.1:5000 with local emulators
 For `npm run dev`, temporarily set `projectId: 'demo-flatapp'` in
 `web/firebase-config.js`; project ids starting with `demo-` make the app talk
 to the local Firestore emulator instead of a real project. The emulator needs
-Java.
+Java 21 or newer.
 
 ```
 web/app.js          screens and interaction
@@ -140,7 +159,8 @@ web/store.js        all Firestore reads and writes
 web/schedule.js     due-date and rotation rules
 web/push.js         notification permission and token
 web/sw.js           offline app shell, shows incoming notifications
-web/vendor/         Firebase browser SDK (update: scripts/vendor-firebase.sh)
+web/vendor/         Firebase browser SDK (scripts/vendor-firebase.sh) and
+                    QR code generator (scripts/vendor-qrcode.sh)
 reminders/          the scheduled reminder job
 firestore.rules     who may read and write what
 ```

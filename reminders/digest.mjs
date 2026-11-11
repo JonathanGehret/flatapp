@@ -1,5 +1,7 @@
 // Decides who gets reminded about what. Pure, so it can be tested.
 
+import { remindPrefs } from '../web/schedule.js';
+
 /** Today's date ('YYYY-MM-DD') in the given IANA time zone. */
 export function localDate(now, timeZone) {
   try {
@@ -9,22 +11,40 @@ export function localDate(now, timeZone) {
   }
 }
 
+/** The hour of the day (0-23) in the given IANA time zone. */
+export function localHour(now, timeZone) {
+  try {
+    return Number(new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', hourCycle: 'h23' }).format(now));
+  } catch {
+    return now.getUTCHours();
+  }
+}
+
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /**
- * One reminder per active member who has something due today or earlier:
- * chores where it is their turn, plus chores without turns ("whoever gets to it").
- * Returns [{ memberId, title, body }].
+ * One reminder per active member who has something to be reminded of:
+ * chores where it is their turn, plus chores without turns ("whoever gets to
+ * it"), due today or earlier. Each member's preferences decide the hours they
+ * hear from us, whether only overdue chores count, whether chores without
+ * turns count, and which chores they muted.
+ *
+ * `hour` is the flat's local hour; null means "regardless of the hour" (a
+ * manual run). Returns [{ memberId, title, body }].
  */
-export function buildDigests(flat, today) {
-  const due = Object.values(flat.chores ?? {})
+export function buildDigests(flat, today, hour = null) {
+  const due = Object.entries(flat.chores ?? {})
+    .map(([id, c]) => ({ id, ...c }))
     .filter((c) => c.next_due <= today)
     .sort((a, b) => a.next_due.localeCompare(b.next_due));
   const digests = [];
   for (const [memberId, member] of Object.entries(flat.members ?? {})) {
     if (!member.active) continue;
-    const mine = due.filter((c) => c.assignee_id === memberId);
-    const open = due.filter((c) => c.assignee_id == null);
+    const prefs = remindPrefs(member);
+    if (hour != null && !prefs.hours.includes(hour)) continue;
+    const wanted = due.filter((c) => !prefs.muted.includes(c.id) && (!prefs.overdue_only || c.next_due < today));
+    const mine = wanted.filter((c) => c.assignee_id === memberId);
+    const open = prefs.open ? wanted.filter((c) => c.assignee_id == null) : [];
     if (!mine.length && !open.length) continue;
     const overdue = mine.filter((c) => c.next_due < today).length;
     const title = mine.length

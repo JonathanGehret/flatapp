@@ -1,20 +1,16 @@
 name: Chore reminders
 
-# Sends push notifications for chores that are due, at 08:00 and 18:00 Berlin
-# time. GitHub's cron is in UTC and ignores daylight saving time, so this
-# fires at both UTC hours that can match (summer and winter) and send.mjs
-# skips the one that does not. Change the times with REMINDER_TZ and
-# REMINDER_HOURS below, and adjust the cron hours to cover them.
+# Sends push notifications for chores that are due. Runs every hour; each
+# flatmate picks their reminder hours in the app (Flat -> Reminders), and the
+# job only reminds the people whose hours match, in the flat's time zone.
+# GitHub may start scheduled runs some minutes late.
 on:
   schedule:
-    - cron: '0 6 * * *'
-    - cron: '0 7 * * *'
-    - cron: '0 16 * * *'
-    - cron: '0 17 * * *'
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       dry_run:
-        description: Only log how many reminders would be sent
+        description: Only log how many reminders would be sent (manual runs remind everyone, whatever their hours)
         type: boolean
         default: false
 
@@ -40,5 +36,3 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
           SCHEDULE: ${{ github.event.schedule }}
-          REMINDER_TZ: Europe/Berlin
-          REMINDER_HOURS: '8,18'

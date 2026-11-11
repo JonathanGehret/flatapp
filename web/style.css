@@ -236,3 +236,20 @@ dialog::backdrop { background: rgb(0 0 0 / 45%); }
 #toast button { color: #5eead4; font-weight: 700; }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* ---------- QR codes & reminder settings ---------- */
+.qr {
+  width: min(280px, 100%); margin: 14px auto 10px; padding: 10px;
+  background: #fff; border-radius: 16px; /* QR codes need dark-on-light, also in dark mode */
+}
+.qr svg { display: block; width: 100%; height: auto; }
+.row.stack { flex-direction: column; align-items: stretch; gap: 10px; }
+.hours { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
+.hours button {
+  padding: 8px 0; border-radius: 10px; background: var(--bg);
+  font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--muted);
+}
+.hours button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
+.check-row { margin: 0; font-size: 16px; font-weight: 500; color: var(--text); cursor: pointer; }
+.check-row input { width: 20px; height: 20px; accent-color: var(--accent); flex: none; }
+.check-row .sub { display: block; }
