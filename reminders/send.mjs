@@ -11,7 +11,7 @@
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
-import { buildDigests, buildNudges, flagTimes, localDate, localHour } from './digest.mjs';
+import { buildDigests, messageTargets, localDate, localHour } from './digest.mjs';
 
 const dryRun = process.env.DRY_RUN === '1';
 const emulator = Boolean(process.env.FIRESTORE_EMULATOR_HOST);
@@ -38,9 +38,11 @@ const now = new Date();
 // next hour cannot remind anyone twice. Manual runs remind everyone,
 // whatever their hours.
 //
-// "Needs doing now" flags are sent on every run, whatever the hour, once
-// per flag.
+// Messages flatmates send each other (reminders to do a chore,
+// congratulations) wait in the flat's outbox and are sent on every run,
+// whatever the hour, then deleted.
 const scheduled = Boolean(process.env.SCHEDULE);
+const cheer = (list) => list[Math.floor(Math.random() * list.length)];
 
 let sent = 0;
 let failed = 0;
@@ -51,22 +53,25 @@ for (const flatDoc of flats.docs) {
   const flat = flatDoc.data();
   const today = localDate(now, flat.tz);
   const hour = scheduled ? localHour(now, flat.tz) : null;
-  // Not readable or writable by the app: firestore.rules has no rule for it.
-  const marker = flatDoc.ref.collection('private').doc('reminders');
-  const mark = (await marker.get()).data() ?? {};
-  const slot = `${today}T${String(hour).padStart(2, '0')}`;
-  const dueNow = !scheduled || mark.last !== slot;
-  const cheer = (list) => list[Math.floor(Math.random() * list.length)];
-  const digests = [
-    ...buildNudges(flat, mark.nudged ?? {}),
-    ...(dueNow ? buildDigests(flat, today, hour, cheer) : []),
-  ];
-  if (!dryRun) {
-    const nudged = flagTimes(flat);
-    const changed = JSON.stringify(nudged) !== JSON.stringify(mark.nudged ?? {});
-    if ((scheduled && dueNow) || changed) {
-      await marker.set({ last: scheduled ? slot : mark.last ?? null, nudged });
+  const digests = [];
+  if (scheduled && !dryRun) {
+    // Not readable or writable by the app: firestore.rules has no rule for it.
+    const marker = flatDoc.ref.collection('private').doc('reminders');
+    const slot = `${today}T${String(hour).padStart(2, '0')}`;
+    if ((await marker.get()).data()?.last !== slot) {
+      await marker.set({ last: slot });
+      digests.push(...buildDigests(flat, today, hour, cheer));
     }
+  } else {
+    digests.push(...buildDigests(flat, today, hour, cheer));
+  }
+  const outbox = (await flatDoc.ref.collection('outbox').get()).docs;
+  for (const message of outbox) {
+    const m = message.data();
+    for (const memberId of messageTargets(flat, m, now.getTime())) {
+      digests.push({ memberId, title: m.title, body: m.body, tag: m.tag });
+    }
+    if (!dryRun) await message.ref.delete();
   }
   if (!digests.length) continue;
 

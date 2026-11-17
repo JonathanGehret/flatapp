@@ -63,7 +63,7 @@ export function pointsFor(base, due, date) {
 
 export const REMINDER_HOURS = Array.from({ length: 18 }, (_, i) => i + 6); // 06:00 to 23:00
 export const REMIND_AHEAD = [0, 1, 2, 3]; // days before the due date to start reminding
-export const REMIND_DEFAULTS = Object.freeze({ hours: [8, 18], overdue_only: false, open: true, muted: [], ahead: 0 });
+export const REMIND_DEFAULTS = Object.freeze({ hours: [8, 18], overdue_only: false, open: true, muted: [], ahead: 0, messages: true });
 
 /** A member's reminder preferences, with defaults for anything not set. */
 export function remindPrefs(member) {
@@ -74,5 +74,7 @@ export function remindPrefs(member) {
     open: r.open ?? REMIND_DEFAULTS.open,
     muted: Array.isArray(r.muted) ? r.muted : [],
     ahead: REMIND_AHEAD.includes(r.ahead) ? r.ahead : REMIND_DEFAULTS.ahead,
+    // Notifications flatmates send: reminders to do a chore, congratulations.
+    messages: r.messages ?? REMIND_DEFAULTS.messages,
   };
 }

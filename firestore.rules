@@ -11,7 +11,8 @@ service cloud.firestore {
         && flat.members is map && flat.members.size() >= 1 && flat.members.size() <= 60
         && flat.chores is map && flat.chores.size() <= 300
         && flat.rewards is map && flat.rewards.size() <= 600
-        && flat.scores is map && flat.scores.size() <= 600;
+        && flat.scores is map && flat.scores.size() <= 600
+        && (!('notes' in flat) || (flat.notes is string && flat.notes.size() <= 2000));
     }
 
     match /flats/{code} {
@@ -33,6 +34,18 @@ service cloud.firestore {
           && request.resource.data.at is number;
         allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions'])
           && request.resource.data.reactions is map && request.resource.data.reactions.size() <= 60;
+      }
+
+      // Notifications for flatmates (reminders, congratulations). Only the
+      // reminder job reads them; it sends and deletes them.
+      match /outbox/{message} {
+        allow read, update, delete: if false;
+        allow create: if request.resource.data.keys().hasOnly(['to', 'title', 'body', 'tag', 'at'])
+          && request.resource.data.to is list && request.resource.data.to.size() >= 1 && request.resource.data.to.size() <= 60
+          && request.resource.data.title is string && request.resource.data.title.size() <= 200
+          && request.resource.data.body is string && request.resource.data.body.size() <= 200
+          && request.resource.data.tag is string && request.resource.data.tag.size() <= 100
+          && request.resource.data.at is number;
       }
 
       // Push tokens. Devices can register and remove themselves, but tokens

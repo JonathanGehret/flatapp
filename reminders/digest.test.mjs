@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDigests, buildNudges, flagTimes, CHEERS, localDate, localHour } from './digest.mjs';
+import { buildDigests, messageTargets, CHEERS, localDate, localHour } from './digest.mjs';
 
 const chore = (title, assignee_id, next_due) => ({ title, icon: '🧹', assignee_id, next_due });
 const flat = (remind = {}) => ({
@@ -100,15 +100,10 @@ test('an encouraging line can be added', () => {
   assert.ok(mia.body.endsWith(`\n${CHEERS[0]}`));
 });
 
-test('"needs doing now" flags go to whoever has the turn, once', () => {
-  const f = flat();
-  f.chores.d.urgent = { by: 'mia', at: 111, message: 'The trash is full' };
-  f.chores.e.urgent = { by: 'tom', at: 222, message: '' };
-  const nudges = buildNudges(f);
-  assert.deepEqual(nudges.map((n) => n.memberId), ['tom', 'mia']); // the flagger is left out
-  assert.equal(nudges[0].title, '🧹 Trash: needs doing now');
-  assert.equal(nudges[0].body, 'Mia: The trash is full It’s your turn.');
-  assert.equal(nudges[1].body, 'Tom: Could you take care of it soon?');
-  assert.deepEqual(flagTimes(f), { d: 111, e: 222 });
-  assert.deepEqual(buildNudges(f, flagTimes(f)), []);
+test('messages from flatmates go to recipients still in the flat who want them', () => {
+  const f = flat({ tom: { messages: false } });
+  const now = Date.parse('2026-11-10T12:00:00Z');
+  const message = { to: ['mia', 'tom', 'old'], at: now - 3600e3 };
+  assert.deepEqual(messageTargets(f, message, now), ['mia']);
+  assert.deepEqual(messageTargets(f, { ...message, at: now - 25 * 3600e3 }, now), []); // too old
 });

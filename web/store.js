@@ -3,6 +3,8 @@
 //   flats/{code}               one document: name, members, chores, prizes, monthly scores
 //   flats/{code}/log/{id}      one document per finished or passed-on chore
 //   flats/{code}/devices/{id}  push tokens (write-only for clients)
+//   flats/{code}/outbox/{id}   notifications for flatmates, sent and deleted by
+//                              the reminder job (write-only for clients)
 //
 // The invite code is the document id and works like a password: whoever
 // knows it can read and edit the flat (see firestore.rules).
@@ -56,6 +58,7 @@ export const normalizeCode = (raw) => String(raw).replace(/[^a-z0-9]/gi, '').toU
 let code = null;
 let data = null; // raw flat document
 let log = []; // newest first
+let logReady = false; // whether the log has arrived at least once
 let listener = () => {};
 let onWriteError = () => {};
 let stop = [];
@@ -63,6 +66,7 @@ let waiters = [];
 
 const flatRef = (c = code) => doc(db, 'flats', c);
 const logRef = (id) => doc(db, 'flats', code, 'log', id);
+const outboxRef = () => doc(db, 'flats', code, 'outbox', newId());
 
 /** The shape the UI renders: arrays instead of the maps Firestore stores. */
 function toState() {
@@ -83,7 +87,7 @@ function toState() {
   // Only the newest entry of a chore can be undone: older ones no longer
   // describe the chore's previous state.
   const activity = log.map((e) => ({ ...e, undoable: data.chores?.[e.chore_id]?.last_log === e.id }));
-  return { flat: { name: data.name, code, tz: data.tz }, members, chores, scores, rewards, activity };
+  return { flat: { name: data.name, code, tz: data.tz, notes: data.notes ?? '' }, members, chores, scores, rewards, activity, logReady };
 }
 
 function emit() {
@@ -113,6 +117,7 @@ export function open(flatCode, onChange, onError) {
     }, onError),
     onSnapshot(query(collection(db, 'flats', code, 'log'), orderBy('at', 'desc'), limit(LOG_LIMIT)), (snap) => {
       log = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      logReady = true;
       emit();
     }, onError),
   ];
@@ -124,6 +129,7 @@ export function close() {
   code = null;
   data = null;
   log = [];
+  logReady = false;
   waiters = [];
 }
 
@@ -210,6 +216,13 @@ export async function flatExists(flatCode) {
 }
 
 export const renameFlat = (name) => write([[['name'], cleanName(name, 'Flat name')]]);
+
+/** The flat's shared notepad: Wi-Fi password, bin days, house rules... Anyone can edit it. */
+export const setFlatNotes = (text) => {
+  const notes = String(text ?? '').trim();
+  if (notes.length > 2000) fail('Keep the notes under 2000 characters');
+  return write([[['notes'], notes]]);
+};
 
 export async function addMember(rawName) {
   const memberId = newId();
@@ -371,21 +384,33 @@ export async function completeChore(id, memberId, date) {
   return { id: entryId, ...entry };
 }
 
-/**
- * "Needs doing now" (e.g. the trash is full): the chore becomes due today and
- * the person whose turn it is gets a notification at the next reminder run.
- */
-export function flagChore(id, memberId, message, today) {
-  const c = data.chores[id] ?? fail('This chore no longer exists');
-  const text = String(message ?? '').trim();
-  if (text.length > 80) fail('Keep the message under 80 characters');
-  return write([
-    [['chores', id, 'urgent'], { by: memberId, at: Date.now(), message: text, prev_due: c.urgent?.prev_due ?? c.next_due }],
-    [['chores', id, 'next_due'], c.next_due < today ? c.next_due : today],
-  ]);
+/** Who a nudge about chore `c` goes to: whoever has the turn, or everyone else. */
+export function nudgeTargets(c, from) {
+  const to = c.assignee_id ? [c.assignee_id] : activeIds();
+  return to.filter((id) => id !== from);
 }
 
-/** Takes the flag back; the chore keeps its earlier due date. */
+/**
+ * Remind and encourage whoever has the turn ("Hey, the bathroom is still to
+ * do. You can do it!"). The message shows on the chore until it is done and
+ * is sent as a notification at the next reminder run. With `makeDue` (e.g.
+ * the trash is full) the chore also becomes due today.
+ */
+export function nudgeChore(id, memberId, message, today, makeDue = false) {
+  const c = data.chores[id] ?? fail('This chore no longer exists');
+  const text = String(message ?? '').trim();
+  if (!text || text.length > 200) fail('The message must be 1 to 200 characters');
+  const to = nudgeTargets(c, memberId);
+  if (!to.length) fail('There is nobody to remind');
+  const by = data.members[memberId]?.name ?? 'A flatmate';
+  const pairs = [[['chores', id, 'urgent'], { by: memberId, at: Date.now(), message: text, prev_due: c.urgent?.prev_due ?? c.next_due }]];
+  if (makeDue && c.next_due > today) pairs.push([['chores', id, 'next_due'], today]);
+  return write(pairs, (batch) => batch.set(outboxRef(), {
+    to, title: `👋 ${by}: ${c.icon ?? ''} ${c.title}`.replace(/\s+/g, ' '), body: text, tag: `flatapp-now-${id}`, at: Date.now(),
+  }));
+}
+
+/** Takes a reminder back; a chore it made due today gets its earlier date again. */
 export function unflagChore(id) {
   const c = data.chores[id] ?? fail('This chore no longer exists');
   if (!c.urgent) return Promise.resolve();
@@ -395,12 +420,30 @@ export function unflagChore(id) {
   ]);
 }
 
-/** Sets (or, with the same emoji again, removes) a member's reaction to a log entry. */
-export function react(entryId, memberId, emoji) {
+/** A reaction as stored: an emoji (older entries) or { emoji, text }. */
+export const reactionOf = (value) => (typeof value === 'string' ? { emoji: value, text: '' } : { emoji: value?.emoji ?? '', text: value?.text ?? '' });
+
+/**
+ * Congratulates whoever did a chore: an emoji, optionally with a personal
+ * message, which is also sent to them as a notification. Without a message,
+ * tapping the same emoji again takes the reaction back.
+ */
+export async function react(entryId, memberId, emoji, message = '') {
   if (!REACTIONS.includes(emoji)) fail('Unknown reaction');
+  const text = String(message ?? '').trim();
+  if (text.length > 200) fail('Keep the message under 200 characters');
   const entry = log.find((e) => e.id === entryId) ?? fail('This entry is gone');
-  const value = entry.reactions?.[memberId] === emoji ? deleteField() : emoji;
-  updateDoc(logRef(entryId), new FieldPath('reactions', memberId), value).catch(onWriteError);
+  const current = entry.reactions?.[memberId] && reactionOf(entry.reactions[memberId]);
+  const remove = !text && current?.emoji === emoji && !current.text;
+  const batch = writeBatch(db);
+  batch.update(logRef(entryId), new FieldPath('reactions', memberId), remove ? deleteField() : { emoji, text });
+  if (text && entry.member_id !== memberId) {
+    const by = data.members[memberId]?.name ?? 'A flatmate';
+    batch.set(outboxRef(), {
+      to: [entry.member_id], title: `${emoji} ${by} on ${entry.title}`, body: text, tag: `flatapp-cheer-${entryId}`, at: Date.now(),
+    });
+  }
+  batch.commit().catch(onWriteError);
 }
 
 /** Passes the turn to the next person without changing the due date. Returns who is up now. */

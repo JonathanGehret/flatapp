@@ -7,6 +7,7 @@ import { fmt, toDate, addDays, diffDays, pointsFor, remindPrefs, REMINDER_HOURS,
 const LS_SESSION = 'flatapp.session';
 const LS_STATE = 'flatapp.state';
 const LS_DEVICE = 'flatapp.device';
+const LS_SEEN = 'flatapp.seen'; // { [flat code]: time of the newest activity this device has shown }
 
 const ICONS = ['🧹', '🧽', '🍽️', '🚿', '🚽', '🗑️', '♻️', '🧺', '🪟', '🛒', '🌱', '💐', '🌷', '🌻', '🪴', '🧊', '🛏️', '🧴', '📦', '🐈', '🔧', '✨'];
 const EFFORT = ['', 'Quick', 'Medium', 'Big'];
@@ -38,7 +39,7 @@ let session = read(LS_SESSION); // { code, memberId }
 let state = session ? read(LS_STATE) : null; // last known state, for an instant first paint
 let device = read(LS_DEVICE); // { id, on, nudged, installHidden }: settings of this device
 // `joining` holds a flat we can see but have not picked a person in yet.
-const ui = { tab: 'tasks', filter: 'mine', offline: !navigator.onLine, joining: null, setup: false, reactFor: null };
+const ui = { tab: 'tasks', filter: 'mine', offline: !navigator.onLine, joining: null, setup: false };
 
 const app = document.getElementById('app');
 const sheet = document.getElementById('sheet');
@@ -100,24 +101,77 @@ function friendly(err) {
   return err?.message || 'Something went wrong';
 }
 
-/** Reactions others gave to my finished chores, as 'entry|member|emoji' keys. */
-let seenReactions = null;
-function announceReactions() {
-  if (!session) return;
-  const now = new Set();
-  const fresh = [];
-  for (const a of state.activity) {
-    if (a.member_id !== session.memberId) continue;
-    for (const [mid, emoji] of Object.entries(a.reactions ?? {})) {
-      if (mid === session.memberId) continue;
-      const key = `${a.id}|${mid}|${emoji}`;
-      now.add(key);
-      if (seenReactions && !seenReactions.has(key)) fresh.push(`${member(mid)?.name ?? 'Someone'} ${emoji} your ${a.title}`);
+// ---------- pop-ups about what flatmates do ----------
+
+/** Pop-ups shown one after another, so none hides the previous one. */
+const popups = [];
+let popupTimer = null;
+function popup(text, action) {
+  popups.push({ text, action });
+  if (!popupTimer) nextPopup();
+}
+function nextPopup() {
+  const next = popups.shift();
+  if (!next) { popupTimer = null; return; }
+  toast(next.text, next.action);
+  popupTimer = setTimeout(nextPopup, next.action ? 6200 : 3400);
+}
+
+/** "Next: Tom", "Next: you", or "Next: anyone" for chores without turns. */
+function nextUp(id) {
+  if (!id) return 'Next: anyone';
+  return id === session.memberId ? 'Next: you' : `Next: ${member(id)?.name ?? 'someone'}`;
+}
+
+const congratulate = (id) => ({ label: '🎉 Congratulate', run: () => congratsSheet(id) });
+
+/**
+ * Tells everyone what happened: chores flatmates finished (also those
+ * finished while the app was closed), congratulations to me, and reminders
+ * sent to me. Reactions and reminders already there when the app opens are
+ * not repeated; they show on the activity list and the chore.
+ */
+let seen = null; // { reactions: Set, nudges: Set } since this session started
+function announce() {
+  if (!session || !state.logReady) return;
+  const all = read(LS_SEEN) ?? {};
+  const since = all[session.code];
+  const newest = Math.max(0, ...state.activity.map((a) => a.at));
+  if (since != null && newest > since) {
+    const done = state.activity
+      .filter((a) => a.at > since && a.kind === 'done' && !a.private && a.member_id !== session.memberId)
+      .reverse();
+    if (done.length === 1 || (done.length && seen)) {
+      for (const a of done) popup(`${member(a.member_id)?.name ?? 'Someone'} did ${a.title} · ${nextUp(a.next_assignee)}`, congratulate(a.id));
+    } else if (done.length) {
+      const mineNext = done.filter((a) => a.next_assignee === session.memberId).map((a) => a.title);
+      popup(`${plural(done.length, 'chore')} done since you were here${mineNext.length ? ` · Your turn next: ${mineNext.join(', ')}` : ''}`,
+        { label: 'See', run: () => { ui.tab = 'scores'; render(); } });
     }
   }
-  // The first snapshot only sets the baseline; the log may also arrive after the flat.
-  if (seenReactions && fresh.length) toast(fresh.join(' · '));
-  if (seenReactions || state.activity.length) seenReactions = now;
+  if (since == null || newest > since) write(LS_SEEN, { ...all, [session.code]: Math.max(newest, since ?? 0) });
+
+  const reactions = new Set();
+  for (const a of state.activity) {
+    if (a.member_id !== session.memberId) continue;
+    for (const [mid, value] of Object.entries(a.reactions ?? {})) {
+      if (mid === session.memberId) continue;
+      const { emoji, text } = store.reactionOf(value);
+      const key = `${a.id}|${mid}|${emoji}|${text}`;
+      reactions.add(key);
+      if (seen && !seen.reactions.has(key)) {
+        const name = member(mid)?.name ?? 'Someone';
+        popup(text ? `${emoji} ${name}: ${text}` : `${name} ${emoji} your ${a.title}`);
+      }
+    }
+  }
+  const nudges = new Set();
+  for (const c of myChores()) {
+    if (!c.urgent || c.urgent.by === session.memberId || !store.nudgeTargets(c, c.urgent.by).includes(session.memberId)) continue;
+    nudges.add(c.urgent.at);
+    if (seen && !seen.nudges.has(c.urgent.at)) popup(`👋 ${member(c.urgent.by)?.name ?? 'A flatmate'}: ${c.urgent.message}`);
+  }
+  seen = { reactions, nudges };
 }
 
 let lastRendered = '';
@@ -126,7 +180,7 @@ function setState(next) {
   if (json === lastRendered) return; // Firestore also reports metadata-only changes
   lastRendered = json;
   state = next;
-  announceReactions();
+  announce();
   write(LS_STATE, state);
   // Opened through a personal link: sign in as that person if they are still in the flat.
   if (!session && ui.joining?.memberId) {
@@ -152,7 +206,7 @@ function setState(next) {
 function setSession(next, keepFlat = false) {
   session = next;
   write(LS_SESSION, session);
-  seenReactions = null;
+  seen = null;
   if (!next && !keepFlat) {
     state = null;
     lastRendered = '';
@@ -359,7 +413,7 @@ function choreCard(c) {
       <span class="icon">${esc(c.icon)}</span>
       <span class="body">
         <span class="title">${esc(c.title)}${c.notes ? ' <span class="note-mark" title="Has notes">📝</span>' : ''}</span>
-        ${c.urgent ? `<span class="flag">🚨 ${esc(member(c.urgent.by)?.name ?? 'Someone')}: ${esc(c.urgent.message || 'needs doing now')}</span>` : ''}
+        ${c.urgent ? `<span class="flag">👋 ${esc(member(c.urgent.by)?.name ?? 'Someone')}: ${esc(c.urgent.message || 'needs doing now')}</span>` : ''}
         <span class="meta"><span class="${due.cls}">${esc(due.text)}</span>·${avatar(who, 'sm')}<span>${who ? (mine ? 'You' : esc(who.name)) : 'Anyone'}</span>·${gainLabel(c)}</span>
       </span>
     </button>
@@ -373,12 +427,12 @@ function tasksView() {
     <button data-action="filter" data-filter="all" aria-pressed="${ui.filter === 'all'}">Everyone</button>
   </div>`;
   if (!myChores().length) {
-    return `<div class="empty"><div class="big">🧹</div><b>No chores yet</b>Add the first one with the button below.</div>`;
+    return `<div class="empty"><div class="big">🌱</div><b>No chores yet</b>Add the first one with the button below.</div>`;
   }
   const today = todayStr();
   const list = myChores().filter((c) => ui.filter === 'all' || c.assignee_id === session.memberId || c.assignee_id == null);
   const groups = [
-    ['Needs doing now', 'overdue', (d, c) => c.urgent],
+    ['Reminders from flatmates', 'overdue', (d, c) => c.urgent],
     ['Overdue', 'overdue', (d, c) => !c.urgent && d < 0],
     ['Today', '', (d, c) => !c.urgent && d === 0],
     ['Next 7 days', '', (d) => d > 0 && d <= 7],
@@ -396,7 +450,7 @@ function tasksView() {
       <button class="link" data-action="push-on">Turn on</button>
       <button class="close" data-action="push-later" aria-label="Not now">✕</button>
     </div>` : '');
-  return greeting() + filter + nudge + (html || `<div class="empty"><div class="big">🎉</div><b>Nothing on your plate</b>None of the chores are yours right now.</div>`);
+  return greeting() + filter + nudge + (html || `<div class="empty"><div class="big">🌻</div><b>Nothing on your plate</b>None of the chores are yours right now.</div>`);
 }
 
 /** A friendly line on top of the to-do list: what is left today and how the month goes. */
@@ -415,7 +469,7 @@ function greeting() {
   else if (doneToday) line = 'All done for today. Enjoy the clean flat ✨';
   else line = 'Nothing due for you right now 🌿';
   const score = mine ? `${plural(mine, 'point')} this month${rank === 1 ? ' · you’re in the lead 👑' : rank ? ` · #${rank}` : ''}` : 'Earn points for this month’s prize 🏆';
-  return `<div class="hello"><b>${hello}, ${esc(me().name)}!</b><div>${line}</div><div class="sub">${score}</div></div>`;
+  return `<div class="hello"><span class="bloom" aria-hidden="true">🌷🌼</span><b>${hello}, ${esc(me().name)}!</b><div>${line}</div><div class="sub">${score}</div></div>`;
 }
 
 function choresView() {
@@ -519,20 +573,21 @@ function scoresView() {
   }).join('')}</div>` : ''}`;
 }
 
-/** Reactions under a finished chore: a chip per emoji, and a button to add your own. */
+/** Congratulations under a finished chore: a chip per emoji, personal messages, and a button to add yours. */
 function reactionsRow(a) {
   const counts = {};
-  for (const [mid, emoji] of Object.entries(a.reactions ?? {})) (counts[emoji] ??= []).push(mid);
+  const notes = [];
+  for (const [mid, value] of Object.entries(a.reactions ?? {})) {
+    const { emoji, text } = store.reactionOf(value);
+    (counts[emoji] ??= []).push(mid);
+    if (text) notes.push(`<div class="cheer"><b>${esc(member(mid)?.name ?? 'Someone')}</b> ${esc(emoji)} ${esc(text)}</div>`);
+  }
   const chips = Object.entries(counts).map(([emoji, mids]) => {
     const who = mids.map((mid) => member(mid)?.name ?? 'Someone').join(', ');
-    const minePressed = mids.includes(session.memberId);
-    return `<button class="reaction" data-action="react" data-id="${a.id}" data-emoji="${esc(emoji)}" aria-pressed="${minePressed}" title="${esc(who)}">${esc(emoji)} ${mids.length}</button>`;
+    return `<button class="reaction" data-action="react" data-id="${a.id}" data-emoji="${esc(emoji)}" aria-pressed="${mids.includes(session.memberId)}" title="${esc(who)}">${esc(emoji)} ${mids.length}</button>`;
   }).join('');
-  const own = a.member_id === session.memberId;
-  const menu = ui.reactFor === a.id
-    ? `<span class="react-menu">${store.REACTIONS.map((e) => `<button data-action="react" data-id="${a.id}" data-emoji="${e}">${e}</button>`).join('')}</span>`
-    : own ? '' : `<button class="reaction add" data-action="react-menu" data-id="${a.id}" aria-label="React">☺︎+</button>`;
-  return chips || menu ? `<div class="reactions">${chips}${menu}</div>` : '';
+  const add = a.member_id === session.memberId ? '' : `<button class="reaction add" data-action="congrats" data-id="${a.id}">🎉 Congratulate</button>`;
+  return chips || add || notes.length ? `<div class="reactions">${chips}${add}</div>${notes.join('')}` : '';
 }
 
 const myPrefs = () => remindPrefs(me());
@@ -563,6 +618,8 @@ function remindersPanel() {
       <span class="grow">Only for overdue chores<span class="sub">Not on the day they are due</span></span></label>
     <label class="row check-row"><input type="checkbox" data-pref="open" ${prefs.open ? 'checked' : ''}>
       <span class="grow">Include chores anyone can do<span class="sub">The ones set to "whoever gets to it"</span></span></label>
+    <label class="row check-row"><input type="checkbox" data-pref="messages" ${prefs.messages ? 'checked' : ''}>
+      <span class="grow">Messages from flatmates<span class="sub">When someone reminds you of a chore or congratulates you</span></span></label>
     <div class="row"><div class="grow sub">${muted ? `${plural(muted, 'chore')} muted for you.` : 'To mute a single chore, open it and turn off its reminder.'} These settings are yours and apply on all your devices.</div></div>
   </div>`;
 }
@@ -573,7 +630,14 @@ function flatView() {
     : installEvent
       ? `<div class="row"><div class="grow">Install as an app</div><button class="link" data-action="install">Install</button></div>`
       : `<div class="row"><div class="grow sub">Install as an app: ${isIOS() ? 'tap Share in Safari, then Add to Home Screen.' : 'open the browser menu and choose Install app or Add to Home screen.'}</div></div>`;
-  return `<div class="section"><h2>Invite flatmates</h2></div>
+  return `<div class="section"><h2>📌 Flat notes</h2></div>
+  <div class="panel pinboard">
+    <div class="row"><div class="grow">${state.flat.notes
+      ? `<div class="notes-text">${esc(state.flat.notes)}</div>`
+      : '<div class="sub">Wi-Fi password, bin days, house rules… Anyone in the flat can edit this.</div>'}</div>
+      <button class="link" data-action="edit-flat-notes">${state.flat.notes ? 'Edit' : 'Add'}</button></div>
+  </div>
+  <div class="section"><h2>Invite flatmates</h2></div>
   <div class="panel" style="padding-bottom:14px">
     <div class="code">${formatCode(state.flat.code)}</div>
     <p class="hint" style="text-align:center">Anyone with this code can see and edit the flat.</p>
@@ -652,8 +716,8 @@ function detailSheet(id) {
     ? 'Private: only you see it, no points'
     : `${EFFORT[c.points]} (${plural(c.points, 'point')})${now !== c.points ? ` · ${plural(now, 'point')} if done today` : ''}`;
   const flag = c.urgent
-    ? `<div class="flag-box">🚨 <b>${esc(member(c.urgent.by)?.name ?? 'Someone')}</b>: ${esc(c.urgent.message || 'needs doing now')}
-        <button class="link" data-action="unflag" data-id="${c.id}">Take back</button></div>`
+    ? `<div class="flag-box"><span class="grow">👋 <b>${esc(member(c.urgent.by)?.name ?? 'Someone')}</b>: ${esc(c.urgent.message || 'needs doing now')}</span>
+        ${c.urgent.by === session.memberId ? `<button class="link" data-action="unflag" data-id="${c.id}">Take back</button>` : ''}</div>`
     : '';
   openSheet(`
     <div class="sheet-head"><span class="icon ${c.color ? 'tinted' : ''}"${tint(c)}>${esc(c.icon)}</span><h2>${esc(c.title)}</h2><button class="close" data-action="close" aria-label="Close">✕</button></div>
@@ -674,13 +738,67 @@ function detailSheet(id) {
       <div class="btns"><button class="btn">Mark as done</button></div>
     </form>
     <div class="btns">
-      ${!c.urgent && !c.private_to ? `<button class="btn ghost" data-action="flag" data-id="${c.id}">🚨 Needs doing now</button>` : ''}
+      ${!c.private_to && c.assignee_id !== session.memberId && store.nudgeTargets(c, session.memberId).length
+        ? `<button class="btn ghost" data-action="nudge" data-id="${c.id}">👋 Remind &amp; encourage ${esc(c.assignee_id ? member(c.assignee_id)?.name : 'everyone')}</button>` : ''}
       ${c.rotation.length > 1 ? `<button class="btn ghost" data-action="skip" data-id="${c.id}">Pass to the next person</button>` : ''}
       <div class="btns two" style="margin:0">
         <button class="btn ghost" data-action="edit" data-id="${c.id}">Edit</button>
         <button class="btn danger" data-action="delete" data-id="${c.id}">Delete</button>
       </div>
     </div>`);
+}
+
+function nudgeSheet(id) {
+  const c = chore(id);
+  if (!c) return;
+  const name = c.assignee_id ? member(c.assignee_id)?.name ?? 'there' : 'everyone';
+  const due = c.next_due <= todayStr();
+  const text = due
+    ? `Hey ${name}, “${c.title}” is still to do. You can do it! 💪 Good luck!`
+    : `Hey ${name}, “${c.title}” needs doing now. You can do it! 💪`;
+  openSheet(`
+    <div class="sheet-head"><h2>👋 Remind ${esc(name)}</h2><button class="close" data-action="close" aria-label="Close">✕</button></div>
+    <form data-form="nudge" data-id="${c.id}">
+      <label for="n-text">Message</label>
+      <textarea id="n-text" name="text" maxlength="200" rows="3" required>${esc(text)}</textarea>
+      <p class="hint">Keep this text or write your own.</p>
+      ${due ? '' : `<label class="choice" style="margin-top:12px"><input type="checkbox" name="make_due" checked>
+        <span>It needs doing now<small>Moves it from ${esc(dueLabel(c).text.replace(/^Tomorrow$/, 'tomorrow'))} to today, e.g. when the trash is full</small></span></label>`}
+      <p class="hint" style="margin-top:10px">${esc(name === 'everyone' ? 'Everyone sees' : `${name} sees`)} it on the chore right away and gets a notification within the hour.</p>
+      <div class="btns"><button class="btn">Send 👋</button></div>
+    </form>`);
+  const area = sheet.querySelector('textarea');
+  area.focus();
+  area.setSelectionRange(area.value.length, area.value.length);
+}
+
+function congratsSheet(entryId) {
+  const a = state.activity.find((x) => x.id === entryId);
+  if (!a) return;
+  const name = member(a.member_id)?.name ?? 'them';
+  const mine = a.reactions?.[session.memberId] && store.reactionOf(a.reactions[session.memberId]);
+  const emoji = mine?.emoji || store.REACTIONS[0];
+  openSheet(`
+    <div class="sheet-head"><h2>🎉 Congratulate ${esc(name)}</h2><button class="close" data-action="close" aria-label="Close">✕</button></div>
+    <p class="hint">${esc(name)} did ${esc(a.title)}.</p>
+    <form data-form="congrats" data-id="${a.id}">
+      <input type="hidden" name="emoji" value="${esc(emoji)}">
+      <div class="picker" data-picker="emoji" style="margin-top:14px">${store.REACTIONS.map((e) => `<button type="button" data-action="pick-value" data-value="${e}" aria-pressed="${e === emoji}">${e}</button>`).join('')}</div>
+      <label for="g-text">Message</label>
+      <textarea id="g-text" name="text" maxlength="200" rows="3">${esc(mine?.text || `Well done, ${name}! Thank you 🙌`)}</textarea>
+      <p class="hint">Keep this text, write your own, or leave it empty to just send the emoji. ${esc(name)} gets the message as a notification.</p>
+      <div class="btns"><button class="btn">Send 🎉</button></div>
+    </form>`);
+}
+
+function flatNotesSheet() {
+  openSheet(`
+    <div class="sheet-head"><h2>📌 Flat notes</h2><button class="close" data-action="close" aria-label="Close">✕</button></div>
+    <form data-form="flat-notes">
+      <label for="f-notes">Anyone in the flat can see and edit this.</label>
+      <textarea id="f-notes" name="notes" maxlength="2000" rows="10" placeholder="Wi-Fi: …&#10;Bins go out on Tuesday evening&#10;Quiet after 22:00">${esc(state.flat.notes)}</textarea>
+      <div class="btns"><button class="btn">Save</button></div>
+    </form>`);
 }
 
 function formSheet(id) {
@@ -747,12 +865,6 @@ function formSheet(id) {
 
 // ---------- actions ----------
 
-/** "Next: Tom", "Next: you", or "Next: anyone" for chores without turns. */
-function nextUp(id) {
-  if (!id) return 'Next: anyone';
-  return id === session.memberId ? 'Next: you' : `Next: ${member(id)?.name ?? 'someone'}`;
-}
-
 /** `from` is where the confetti starts (a DOMRect), if anywhere. */
 async function complete(id, memberId = session.memberId, from = null) {
   const c = chore(id);
@@ -775,6 +887,7 @@ function celebrate(box) {
   for (let i = 0; i < 18; i += 1) {
     const bit = document.createElement('i');
     bit.className = 'confetti';
+    if (i % 4 === 0) { bit.textContent = ['🌸', '🌼', '🌷'][(i / 4) % 3]; bit.classList.add('flower'); }
     const angle = (Math.PI * 2 * i) / 18 + Math.random() * 0.4;
     const dist = 50 + Math.random() * 50;
     bit.style.cssText = `left:${x}px;top:${y}px;background:${colors[i % colors.length]};--dx:${Math.cos(angle) * dist}px;--dy:${Math.sin(angle) * dist - 30}px;--r:${Math.random() * 360}deg`;
@@ -791,22 +904,11 @@ const actions = {
   edit: (el) => formSheet(el.dataset.id),
   close: () => sheet.close(),
   done: (el) => { el.classList.add('pop'); complete(el.dataset.id, session.memberId, el.getBoundingClientRect()); },
-  async flag(el) {
-    const c = chore(el.dataset.id);
-    const message = prompt(`Ask ${c.assignee_id ? member(c.assignee_id)?.name ?? 'them' : 'everyone'} to do "${c.title}" now. Add a short message (optional):`, c.title.toLowerCase().includes('trash') ? 'The trash is full 🗑️' : '');
-    if (message == null) return;
-    if (await run(() => store.flagChore(c.id, session.memberId, message, todayStr()))) {
-      sheet.close();
-      toast('Flagged. They’ll get a notification within the hour.');
-    }
-  },
+  nudge: (el) => nudgeSheet(el.dataset.id),
+  congrats: (el) => congratsSheet(el.dataset.id),
+  'edit-flat-notes': () => flatNotesSheet(),
   unflag: (el) => run(() => store.unflagChore(el.dataset.id)).then((ok) => { if (ok) detailSheet(el.dataset.id); }),
-  'react-menu'(el) { ui.reactFor = ui.reactFor === el.dataset.id ? null : el.dataset.id; render(); },
-  react(el) {
-    ui.reactFor = null;
-    run(() => store.react(el.dataset.id, session.memberId, el.dataset.emoji));
-    render();
-  },
+  react: (el) => run(() => store.react(el.dataset.id, session.memberId, el.dataset.emoji)),
   'set-ahead'(el) { run(() => store.setRemindPrefs(session.memberId, { ahead: Number(el.dataset.days) })); },
   undo: (el) => run(() => store.undo(el.dataset.id)),
 
@@ -964,6 +1066,20 @@ const forms = {
     }));
     ui.setup = false;
     render();
+  },
+  async nudge(data, form) {
+    await store.nudgeChore(form.dataset.id, session.memberId, data.get('text'), todayStr(), Boolean(data.get('make_due')));
+    sheet.close();
+    toast('Sent 👋 They’ll see it right away in the app.');
+  },
+  async congrats(data, form) {
+    await store.react(form.dataset.id, session.memberId, data.get('emoji'), data.get('text'));
+    sheet.close();
+    toast('Sent 🎉');
+  },
+  async 'flat-notes'(data) {
+    await store.setFlatNotes(data.get('notes'));
+    sheet.close();
   },
   async complete(data, form) {
     sheet.close();

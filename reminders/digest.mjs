@@ -81,37 +81,18 @@ export function buildDigests(flat, today, hour = null, cheer = null) {
   return digests;
 }
 
-/**
- * "Needs doing now" flags: whoever flagged a chore wants it done soon, so the
- * person whose turn it is hears about it at the next run, whatever their
- * hours or mutes. Chores without turns go to everyone. The flagger is left
- * out. `sent` maps chore id to the flag time already announced, so each flag
- * is sent once. Returns [{ memberId, title, body, tag }].
- */
-export function buildNudges(flat, sent = {}) {
-  const members = flat.members ?? {};
-  const nudges = [];
-  for (const [id, c] of Object.entries(flat.chores ?? {})) {
-    const flag = c.urgent;
-    if (!flag?.at || sent[id] === flag.at) continue;
-    const by = members[flag.by]?.name ?? 'A flatmate';
-    const to = c.assignee_id
-      ? [c.assignee_id]
-      : Object.keys(members).filter((m) => members[m].active);
-    for (const memberId of to) {
-      if (memberId === flag.by || !members[memberId]?.active) continue;
-      nudges.push({
-        memberId,
-        title: `${c.icon ?? ''} ${c.title}: needs doing now`.trim(),
-        body: `${by}: ${flag.message || 'Could you take care of it soon?'}${c.assignee_id ? ' It’s your turn.' : ''}`,
-        tag: `flatapp-now-${id}`,
-      });
-    }
-  }
-  return nudges;
-}
+/** Messages older than this are dropped instead of sent. */
+export const OUTBOX_MAX_AGE = 24 * 3600 * 1000;
 
-/** The flags to remember as sent: every chore currently flagged. */
-export const flagTimes = (flat) => Object.fromEntries(
-  Object.entries(flat.chores ?? {}).filter(([, c]) => c.urgent?.at).map(([id, c]) => [id, c.urgent.at]),
-);
+/**
+ * Who gets a message a flatmate sent (a reminder to do a chore, a
+ * congratulation): its recipients who are still in the flat and have not
+ * switched off messages from flatmates. Nobody once it is too old.
+ */
+export function messageTargets(flat, message, now) {
+  if (!(now - message.at < OUTBOX_MAX_AGE)) return [];
+  return (message.to ?? []).filter((id) => {
+    const member = flat.members?.[id];
+    return member?.active && remindPrefs(member).messages;
+  });
+}
