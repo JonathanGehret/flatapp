@@ -87,9 +87,11 @@ The app is now live at `https://YOUR_PROJECT_ID.web.app`. Run the same deploy
 command again after any change to `web/` or `firestore.rules`, or let GitHub
 do it: [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) deploys
 on every change to those files on `main`, using the `FIREBASE_SERVICE_ACCOUNT`
-secret from step 3. That service account needs the **Firebase Hosting Admin**
-and **Firebase Rules Admin** roles (Google Cloud console → IAM → edit the
-`firebase-adminsdk` account → Add another role).
+secret from step 3. That service account needs the **Firebase Admin** role to
+deploy: in the [Google Cloud console](https://console.cloud.google.com/iam-admin/iam),
+pick the project, edit the `firebase-adminsdk-…@….iam.gserviceaccount.com`
+principal, **Add another role → Firebase Admin**, save, then re-run the
+workflow (**Actions → Deploy → Run workflow**).
 
 ### 3. Turn on reminders
 
