@@ -1,9 +1,9 @@
 name: Deploy
 
 # Publishes the app (web/) and the Firestore rules whenever they change on the
-# default branch. Uses the same FIREBASE_SERVICE_ACCOUNT secret as the
-# reminder job; that service account needs the Firebase Admin role to deploy
-# (see README).
+# default branch, as the flatapp-deploy service account (secret
+# FIREBASE_DEPLOY_SERVICE_ACCOUNT). That account may only deploy Hosting and
+# rules; the reminder job keeps its own, separate account.
 on:
   push:
     branches: [main]
@@ -27,8 +27,8 @@ jobs:
       - run: npm test
       - name: Deploy Hosting and Firestore rules
         env:
-          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          FIREBASE_DEPLOY_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_DEPLOY_SERVICE_ACCOUNT }}
         run: |
-          printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/service-account.json"
+          printf '%s' "$FIREBASE_DEPLOY_SERVICE_ACCOUNT" > "$RUNNER_TEMP/service-account.json"
           export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/service-account.json"
-          npx --yes firebase-tools@14 deploy --only hosting,firestore:rules --non-interactive
+          npx --yes firebase-tools@14 deploy --only hosting,firestore:rules --non-interactive --project flatapp-jgehret
