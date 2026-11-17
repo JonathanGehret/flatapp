@@ -357,11 +357,13 @@ function logEntry(choreId, c, memberId, kind, date) {
  */
 export async function completeChore(id, memberId, date) {
   const c = data.chores[id] ?? fail('This chore no longer exists');
-  const entry = logEntry(id, c, memberId, 'done', date);
+  const next = nextInRotation(c.rotation, c.assignee_id);
+  // Who is up next time, shown in the confirmation and the activity list.
+  const entry = { ...logEntry(id, c, memberId, 'done', date), next_assignee: next };
   const entryId = newId();
   await write([
     [['chores', id, 'next_due'], nextDue(date, c.interval_n, c.interval_unit)],
-    [['chores', id, 'assignee_id'], nextInRotation(c.rotation, c.assignee_id)],
+    [['chores', id, 'assignee_id'], next],
     [['chores', id, 'last_log'], entryId],
     [['chores', id, 'urgent'], null],
     ...(c.private_to ? [] : scorePairs(date.slice(0, 7), memberId, entry.points, 1)),

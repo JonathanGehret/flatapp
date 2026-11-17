@@ -18,6 +18,8 @@ and who has been doing how much.
 - **Private chores**: chores just for you, like cleaning your own room. Only
   you see them and they earn no points. (They are hidden in the app, not
   encrypted: anyone with the invite code could still read them in the data.)
+- **Who is next**: the confirmation after finishing a chore and the activity
+  list say whose turn it is next time.
 - **Reactions**: react to finished chores with an emoji; the person who did it
   sees a toast. Confetti and a friendly greeting do the rest.
 - **Monthly prize**: the flat writes down a reward ("dinner cooked by the

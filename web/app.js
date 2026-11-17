@@ -502,7 +502,7 @@ function scoresView() {
       <span class="icon">${esc(a.icon)}</span>
       <div class="grow">
         <div><b>${esc(member(a.member_id)?.name ?? 'Someone')}</b> ${a.kind === 'done' ? 'did' : 'passed on'} ${esc(a.title)}${a.private ? ' 🔒' : ''}</div>
-        <div class="sub">${when(a.date)}${a.kind === 'done' && !a.private ? ` · +${a.points}` : ''}</div>
+        <div class="sub">${when(a.date)}${a.kind === 'done' && !a.private ? ` · +${a.points}${'next_assignee' in a ? ` · ${nextUp(a.next_assignee)}` : ''}` : ''}</div>
         ${a.kind === 'done' && !a.private ? reactionsRow(a) : ''}
       </div>
       ${a.undoable ? `<button class="link" data-action="undo" data-id="${a.id}">Undo</button>` : ''}
@@ -747,6 +747,12 @@ function formSheet(id) {
 
 // ---------- actions ----------
 
+/** "Next: Tom", "Next: you", or "Next: anyone" for chores without turns. */
+function nextUp(id) {
+  if (!id) return 'Next: anyone';
+  return id === session.memberId ? 'Next: you' : `Next: ${member(id)?.name ?? 'someone'}`;
+}
+
 /** `from` is where the confetti starts (a DOMRect), if anywhere. */
 async function complete(id, memberId = session.memberId, from = null) {
   const c = chore(id);
@@ -756,7 +762,7 @@ async function complete(id, memberId = session.memberId, from = null) {
   celebrate(from);
   const extra = c.private_to ? '' : entry.points > c.points ? ` · +${entry.points} (early bonus!)` : ` · +${entry.points}`;
   const who = memberId === session.memberId ? pick(CHEERS) : `Logged for ${member(memberId)?.name}.`;
-  toast(`${who} ${c.title}${extra}`, { label: 'Undo', run: () => run(() => store.undo(entry.id)) });
+  toast(`${who} ${c.title}${extra}${c.private_to ? '' : ` · ${nextUp(entry.next_assignee)}`}`, { label: 'Undo', run: () => run(() => store.undo(entry.id)) });
 }
 
 /** A small burst of confetti from `box` (or the middle of the screen). */
