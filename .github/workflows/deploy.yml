@@ -2,8 +2,8 @@ name: Deploy
 
 # Publishes the app (web/) and the Firestore rules whenever they change on the
 # default branch. Uses the same FIREBASE_SERVICE_ACCOUNT secret as the
-# reminder job; that service account needs permission to deploy Hosting and
-# Firestore rules (see README).
+# reminder job; that service account needs the Firebase Admin role to deploy
+# (see README).
 on:
   push:
     branches: [main]
