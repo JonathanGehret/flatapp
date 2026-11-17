@@ -86,12 +86,19 @@ firebase deploy --only hosting,firestore:rules --project YOUR_PROJECT_ID
 The app is now live at `https://YOUR_PROJECT_ID.web.app`. Run the same deploy
 command again after any change to `web/` or `firestore.rules`, or let GitHub
 do it: [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) deploys
-on every change to those files on `main`, using the `FIREBASE_SERVICE_ACCOUNT`
-secret from step 3. That service account needs the **Firebase Admin** role to
-deploy: in the [Google Cloud console](https://console.cloud.google.com/iam-admin/iam),
-pick the project, edit the `firebase-adminsdk-…@….iam.gserviceaccount.com`
-principal, **Add another role → Firebase Admin**, save, then re-run the
-workflow (**Actions → Deploy → Run workflow**).
+on every change to those files on `main`. It needs its own service account,
+allowed to deploy and nothing else:
+
+```sh
+P=YOUR_PROJECT_ID; SA=flatapp-deploy@$P.iam.gserviceaccount.com
+gcloud iam service-accounts create flatapp-deploy --project $P
+for R in firebasehosting.admin firebaserules.admin firebase.viewer serviceusage.serviceUsageConsumer; do
+  gcloud projects add-iam-policy-binding $P --member serviceAccount:$SA --role roles/$R --condition=None
+done
+gcloud iam service-accounts keys create deploy-key.json --iam-account $SA
+gh secret set FIREBASE_DEPLOY_SERVICE_ACCOUNT < deploy-key.json
+rm deploy-key.json
+```
 
 ### 3. Turn on reminders
 
