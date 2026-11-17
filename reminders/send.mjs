@@ -11,7 +11,7 @@
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
-import { buildDigests, localDate, localHour } from './digest.mjs';
+import { buildDigests, messageTargets, localDate, localHour } from './digest.mjs';
 
 const dryRun = process.env.DRY_RUN === '1';
 const emulator = Boolean(process.env.FIRESTORE_EMULATOR_HOST);
@@ -37,7 +37,12 @@ const now = new Date();
 // remembers the last hour it was handled for, so a run that slips into the
 // next hour cannot remind anyone twice. Manual runs remind everyone,
 // whatever their hours.
+//
+// Messages flatmates send each other (reminders to do a chore,
+// congratulations) wait in the flat's outbox and are sent on every run,
+// whatever the hour, then deleted.
 const scheduled = Boolean(process.env.SCHEDULE);
+const cheer = (list) => list[Math.floor(Math.random() * list.length)];
 
 let sent = 0;
 let failed = 0;
@@ -48,14 +53,26 @@ for (const flatDoc of flats.docs) {
   const flat = flatDoc.data();
   const today = localDate(now, flat.tz);
   const hour = scheduled ? localHour(now, flat.tz) : null;
+  const digests = [];
   if (scheduled && !dryRun) {
     // Not readable or writable by the app: firestore.rules has no rule for it.
     const marker = flatDoc.ref.collection('private').doc('reminders');
     const slot = `${today}T${String(hour).padStart(2, '0')}`;
-    if ((await marker.get()).data()?.last === slot) continue;
-    await marker.set({ last: slot });
+    if ((await marker.get()).data()?.last !== slot) {
+      await marker.set({ last: slot });
+      digests.push(...buildDigests(flat, today, hour, cheer));
+    }
+  } else {
+    digests.push(...buildDigests(flat, today, hour, cheer));
   }
-  const digests = buildDigests(flat, today, hour);
+  const outbox = (await flatDoc.ref.collection('outbox').get()).docs;
+  for (const message of outbox) {
+    const m = message.data();
+    for (const memberId of messageTargets(flat, m, now.getTime())) {
+      digests.push({ memberId, title: m.title, body: m.body, tag: m.tag });
+    }
+    if (!dryRun) await message.ref.delete();
+  }
   if (!digests.length) continue;
 
   const devices = (await flatDoc.ref.collection('devices').get()).docs;
@@ -69,7 +86,7 @@ for (const flatDoc of flats.docs) {
     }
     const result = await getMessaging().sendEachForMulticast({
       tokens: targets.map((d) => d.data().token),
-      data: { title: digest.title, body: digest.body },
+      data: { title: digest.title, body: digest.body, tag: digest.tag ?? 'flatapp-reminder' },
       webpush: { headers: { Urgency: 'high', TTL: '43200' } }, // give up after 12 hours
     });
     for (const [i, response] of result.responses.entries()) {

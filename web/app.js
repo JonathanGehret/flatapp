@@ -2,13 +2,14 @@
 // a pure render of it.
 
 import * as store from './store.js';
-import { fmt, toDate, remindPrefs, REMINDER_HOURS } from './schedule.js';
+import { fmt, toDate, addDays, diffDays, pointsFor, remindPrefs, REMINDER_HOURS, REMIND_AHEAD, EARLY_WITHIN, LATE_AFTER } from './schedule.js';
 
 const LS_SESSION = 'flatapp.session';
 const LS_STATE = 'flatapp.state';
 const LS_DEVICE = 'flatapp.device';
+const LS_SEEN = 'flatapp.seen'; // { [flat code]: time of the newest activity this device has shown }
 
-const ICONS = ['🧹', '🧽', '🍽️', '🚿', '🚽', '🗑️', '♻️', '🧺', '🪟', '🛒', '🌱', '🧊', '🛏️', '🧴', '📦', '🐈', '🔧', '✨'];
+const ICONS = ['🧹', '🧽', '🍽️', '🚿', '🚽', '🗑️', '♻️', '🧺', '🪟', '🛒', '🌱', '💐', '🌷', '🌻', '🪴', '🧊', '🛏️', '🧴', '📦', '🐈', '🔧', '✨'];
 const EFFORT = ['', 'Quick', 'Medium', 'Big'];
 const TEMPLATES = [
   { title: 'Take out the trash', icon: '🗑️', interval_n: 3, interval_unit: 'day', points: 1, on: true },
@@ -19,6 +20,7 @@ const TEMPLATES = [
   { title: 'Mop the floors', icon: '🧽', interval_n: 2, interval_unit: 'week', points: 2, on: true },
   { title: 'Buy shared supplies', icon: '🛒', interval_n: 2, interval_unit: 'week', points: 1 },
   { title: 'Water the plants', icon: '🌱', interval_n: 1, interval_unit: 'week', points: 1 },
+  { title: 'Fresh flowers for the table', icon: '💐', interval_n: 2, interval_unit: 'week', points: 1 },
   { title: 'Clean the fridge', icon: '🧊', interval_n: 1, interval_unit: 'month', points: 2 },
   { title: 'Clean the windows', icon: '🪟', interval_n: 3, interval_unit: 'month', points: 3 },
 ];
@@ -50,8 +52,6 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (ch) => (
 ));
 const pad = (n) => String(n).padStart(2, '0');
 const todayStr = () => fmt(new Date());
-const addDays = (s, n) => { const d = toDate(s); d.setDate(d.getDate() + n); return fmt(d); };
-const diffDays = (a, b) => Math.round((toDate(a) - toDate(b)) / 864e5);
 const shortDate = (s) => toDate(s).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const formatCode = (code) => `${code.slice(0, 5)}-${code.slice(5)}`;
@@ -60,6 +60,11 @@ const member = (id) => state.members.find((m) => m.id === id);
 const activeMembers = () => state.members.filter((m) => m.active);
 const me = () => state?.members.find((m) => m.id === session?.memberId && m.active);
 const chore = (id) => state.chores.find((c) => c.id === id);
+/** Private chores are only shown to their owner. */
+const visible = (c) => !c.private_to || c.private_to === session.memberId;
+const myChores = () => state.chores.filter(visible);
+const pick = (list) => list[Math.floor(Math.random() * list.length)];
+const CHEERS = ['Nice one!', 'Great job!', 'Look at you go!', 'The flat thanks you!', 'Sparkling!', 'Legend!', 'One less thing!', 'Well done!'];
 
 function avatar(m, cls = '') {
   if (!m) return `<span class="avatar anyone ${cls}" title="Anyone">★</span>`;
@@ -96,12 +101,86 @@ function friendly(err) {
   return err?.message || 'Something went wrong';
 }
 
+// ---------- pop-ups about what flatmates do ----------
+
+/** Pop-ups shown one after another, so none hides the previous one. */
+const popups = [];
+let popupTimer = null;
+function popup(text, action) {
+  popups.push({ text, action });
+  if (!popupTimer) nextPopup();
+}
+function nextPopup() {
+  const next = popups.shift();
+  if (!next) { popupTimer = null; return; }
+  toast(next.text, next.action);
+  popupTimer = setTimeout(nextPopup, next.action ? 6200 : 3400);
+}
+
+/** "Next: Tom", "Next: you", or "Next: anyone" for chores without turns. */
+function nextUp(id) {
+  if (!id) return 'Next: anyone';
+  return id === session.memberId ? 'Next: you' : `Next: ${member(id)?.name ?? 'someone'}`;
+}
+
+const congratulate = (id) => ({ label: '🎉 Congratulate', run: () => congratsSheet(id) });
+
+/**
+ * Tells everyone what happened: chores flatmates finished (also those
+ * finished while the app was closed), congratulations to me, and reminders
+ * sent to me. Reactions and reminders already there when the app opens are
+ * not repeated; they show on the activity list and the chore.
+ */
+let seen = null; // { reactions: Set, nudges: Set } since this session started
+function announce() {
+  if (!session || !state.logReady) return;
+  const all = read(LS_SEEN) ?? {};
+  const since = all[session.code];
+  const newest = Math.max(0, ...state.activity.map((a) => a.at));
+  if (since != null && newest > since) {
+    const done = state.activity
+      .filter((a) => a.at > since && a.kind === 'done' && !a.private && a.member_id !== session.memberId)
+      .reverse();
+    if (done.length === 1 || (done.length && seen)) {
+      for (const a of done) popup(`${member(a.member_id)?.name ?? 'Someone'} did ${a.title} · ${nextUp(a.next_assignee)}`, congratulate(a.id));
+    } else if (done.length) {
+      const mineNext = done.filter((a) => a.next_assignee === session.memberId).map((a) => a.title);
+      popup(`${plural(done.length, 'chore')} done since you were here${mineNext.length ? ` · Your turn next: ${mineNext.join(', ')}` : ''}`,
+        { label: 'See', run: () => { ui.tab = 'scores'; render(); } });
+    }
+  }
+  if (since == null || newest > since) write(LS_SEEN, { ...all, [session.code]: Math.max(newest, since ?? 0) });
+
+  const reactions = new Set();
+  for (const a of state.activity) {
+    if (a.member_id !== session.memberId) continue;
+    for (const [mid, value] of Object.entries(a.reactions ?? {})) {
+      if (mid === session.memberId) continue;
+      const { emoji, text } = store.reactionOf(value);
+      const key = `${a.id}|${mid}|${emoji}|${text}`;
+      reactions.add(key);
+      if (seen && !seen.reactions.has(key)) {
+        const name = member(mid)?.name ?? 'Someone';
+        popup(text ? `${emoji} ${name}: ${text}` : `${name} ${emoji} your ${a.title}`);
+      }
+    }
+  }
+  const nudges = new Set();
+  for (const c of myChores()) {
+    if (!c.urgent || c.urgent.by === session.memberId || !store.nudgeTargets(c, c.urgent.by).includes(session.memberId)) continue;
+    nudges.add(c.urgent.at);
+    if (seen && !seen.nudges.has(c.urgent.at)) popup(`👋 ${member(c.urgent.by)?.name ?? 'A flatmate'}: ${c.urgent.message}`);
+  }
+  seen = { reactions, nudges };
+}
+
 let lastRendered = '';
 function setState(next) {
   const json = JSON.stringify(next);
   if (json === lastRendered) return; // Firestore also reports metadata-only changes
   lastRendered = json;
   state = next;
+  announce();
   write(LS_STATE, state);
   // Opened through a personal link: sign in as that person if they are still in the flat.
   if (!session && ui.joining?.memberId) {
@@ -127,6 +206,7 @@ function setState(next) {
 function setSession(next, keepFlat = false) {
   session = next;
   write(LS_SESSION, session);
+  seen = null;
   if (!next && !keepFlat) {
     state = null;
     lastRendered = '';
@@ -314,16 +394,27 @@ function setupScreen() {
 
 // ---------- screens: main ----------
 
+/** Inline style giving a card its chore colour, if it has one. */
+const tint = (c) => (c.color ? ` style="--chore:${esc(c.color)}"` : '');
+
+function gainLabel(c) {
+  if (c.private_to) return '<span title="Private: only you see it">🔒</span>';
+  const now = pointsFor(c.points, c.next_due, todayStr());
+  const cls = now > c.points ? 'gain bonus' : now < c.points ? 'gain less' : 'gain';
+  return `<span class="${cls}" title="${now > c.points ? 'Early bonus' : now < c.points ? 'Late: one point less' : ''}">+${now}</span>`;
+}
+
 function choreCard(c) {
   const due = dueLabel(c);
   const who = member(c.assignee_id);
   const mine = c.assignee_id === session.memberId;
-  return `<div class="card ${mine ? 'mine' : ''}">
+  return `<div class="card ${mine ? 'mine' : ''} ${c.color ? 'tinted' : ''} ${c.urgent ? 'urgent' : ''}"${tint(c)}>
     <button class="open" data-action="open" data-id="${c.id}">
       <span class="icon">${esc(c.icon)}</span>
       <span class="body">
-        <span class="title">${esc(c.title)}</span>
-        <span class="meta"><span class="${due.cls}">${esc(due.text)}</span>·${avatar(who, 'sm')}<span>${who ? (mine ? 'You' : esc(who.name)) : 'Anyone'}</span>·<span class="gain">+${c.points}</span></span>
+        <span class="title">${esc(c.title)}${c.notes ? ' <span class="note-mark" title="Has notes">📝</span>' : ''}</span>
+        ${c.urgent ? `<span class="flag">👋 ${esc(member(c.urgent.by)?.name ?? 'Someone')}: ${esc(c.urgent.message || 'needs doing now')}</span>` : ''}
+        <span class="meta"><span class="${due.cls}">${esc(due.text)}</span>·${avatar(who, 'sm')}<span>${who ? (mine ? 'You' : esc(who.name)) : 'Anyone'}</span>·${gainLabel(c)}</span>
       </span>
     </button>
     <button class="check" data-action="done" data-id="${c.id}" aria-label="Mark ${esc(c.title)} done">✓</button>
@@ -335,19 +426,20 @@ function tasksView() {
     <button data-action="filter" data-filter="mine" aria-pressed="${ui.filter === 'mine'}">My turn</button>
     <button data-action="filter" data-filter="all" aria-pressed="${ui.filter === 'all'}">Everyone</button>
   </div>`;
-  if (!state.chores.length) {
-    return `<div class="empty"><div class="big">🧹</div><b>No chores yet</b>Add the first one with the button below.</div>`;
+  if (!myChores().length) {
+    return `<div class="empty"><div class="big">🌱</div><b>No chores yet</b>Add the first one with the button below.</div>`;
   }
   const today = todayStr();
-  const list = state.chores.filter((c) => ui.filter === 'all' || c.assignee_id === session.memberId || c.assignee_id == null);
+  const list = myChores().filter((c) => ui.filter === 'all' || c.assignee_id === session.memberId || c.assignee_id == null);
   const groups = [
-    ['Overdue', 'overdue', (d) => d < 0],
-    ['Today', '', (d) => d === 0],
+    ['Reminders from flatmates', 'overdue', (d, c) => c.urgent],
+    ['Overdue', 'overdue', (d, c) => !c.urgent && d < 0],
+    ['Today', '', (d, c) => !c.urgent && d === 0],
     ['Next 7 days', '', (d) => d > 0 && d <= 7],
     ['Later', '', (d) => d > 7],
   ];
   const html = groups.map(([name, cls, test]) => {
-    const items = list.filter((c) => test(diffDays(c.next_due, today)));
+    const items = list.filter((c) => test(diffDays(c.next_due, today), c));
     if (!items.length) return '';
     return `<div class="section ${cls}"><h2>${name}</h2><small>${items.length}</small></div>${items.map(choreCard).join('')}`;
   }).join('');
@@ -358,20 +450,39 @@ function tasksView() {
       <button class="link" data-action="push-on">Turn on</button>
       <button class="close" data-action="push-later" aria-label="Not now">✕</button>
     </div>` : '');
-  return filter + nudge + (html || `<div class="empty"><div class="big">🎉</div><b>Nothing on your plate</b>None of the chores are yours right now.</div>`);
+  return greeting() + filter + nudge + (html || `<div class="empty"><div class="big">🌻</div><b>Nothing on your plate</b>None of the chores are yours right now.</div>`);
+}
+
+/** A friendly line on top of the to-do list: what is left today and how the month goes. */
+function greeting() {
+  const h = new Date().getHours();
+  const hello = h < 5 ? 'Still up' : h < 12 ? 'Good morning' : h < 18 ? 'Hi' : 'Good evening';
+  const today = todayStr();
+  const left = myChores().filter((c) => c.assignee_id === session.memberId && c.next_due <= today).length;
+  const doneToday = state.activity.filter((a) => a.kind === 'done' && a.member_id === session.memberId && a.date === today).length;
+  const month = today.slice(0, 7);
+  const board = boardFor(month).sort((a, b) => b.points - a.points);
+  const mine = board.find((s) => s.member_id === session.memberId)?.points ?? 0;
+  const rank = board.findIndex((s) => s.member_id === session.memberId) + 1;
+  let line;
+  if (left) line = `${plural(left, 'chore')} waiting for you${doneToday ? `, ${doneToday} done already. Keep going!` : '. You’ve got this 💪'}`;
+  else if (doneToday) line = 'All done for today. Enjoy the clean flat ✨';
+  else line = 'Nothing due for you right now 🌿';
+  const score = mine ? `${plural(mine, 'point')} this month${rank === 1 ? ' · you’re in the lead 👑' : rank ? ` · #${rank}` : ''}` : 'Earn points for this month’s prize 🏆';
+  return `<div class="hello"><span class="bloom" aria-hidden="true">🌷🌼</span><b>${hello}, ${esc(me().name)}!</b><div>${line}</div><div class="sub">${score}</div></div>`;
 }
 
 function choresView() {
-  if (!state.chores.length) {
+  if (!myChores().length) {
     return `<div class="empty"><div class="big">📋</div><b>No chores yet</b>Add everything that needs doing regularly.</div>`;
   }
-  const sorted = [...state.chores].sort((a, b) => a.title.localeCompare(b.title));
+  const sorted = myChores().sort((a, b) => a.title.localeCompare(b.title));
   return `<div class="section"><h2>All chores</h2><small>${sorted.length}</small></div>` + sorted.map((c) => `
-    <button class="card" data-action="open" data-id="${c.id}">
+    <button class="card ${c.color ? 'tinted' : ''}" data-action="open" data-id="${c.id}"${tint(c)}>
       <span class="icon">${esc(c.icon)}</span>
       <span class="body">
-        <span class="title">${esc(c.title)}</span>
-        <span class="meta">${intervalLabel(c)} · ${EFFORT[c.points]}${myPrefs().muted.includes(c.id) ? ' · <span title="No reminders for you">🔕</span>' : ''}</span>
+        <span class="title">${esc(c.title)}${c.private_to ? ' <span title="Private: only you see it">🔒</span>' : ''}</span>
+        <span class="meta">${intervalLabel(c)} · ${c.private_to ? 'Private' : EFFORT[c.points]}${myPrefs().muted.includes(c.id) ? ' · <span title="No reminders for you">🔕</span>' : ''}</span>
       </span>
       ${c.rotation.length ? c.rotation.map((id) => avatar(member(id), 'sm')).join('') : avatar(null, 'sm')}
     </button>`).join('');
@@ -413,6 +524,7 @@ function scoresView() {
   const lastWin = winnersOf(last);
   const lastPrize = rewardFor(last);
   const earlier = [...new Set(state.scores.map((s) => s.month))].filter((m) => m < last);
+  const activity = state.activity.filter((a) => !a.private || a.member_id === session.memberId);
   const when = (date) => {
     const d = diffDays(today, date);
     return d <= 0 ? 'Today' : d === 1 ? 'Yesterday' : shortDate(date);
@@ -438,13 +550,14 @@ function scoresView() {
       </div>
       <div style="text-align:right"><div class="pts">${r.points}</div><div class="sub">${plural(r.count, 'chore')}</div></div>
     </div>`).join('')}</div>
-  <p class="hint" style="margin-top:8px">Quick chores earn 1 point, medium 2, big 3. Whoever has the most at the end of the month wins the prize.</p>
+  <p class="hint" style="margin-top:8px">Quick chores earn 1 point, medium 2, big 3. Done 1 to ${EARLY_WITHIN} days before the due date: +1 bonus. ${LATE_AFTER} or more days late: 1 point less (never below 1). Whoever has the most at the end of the month wins the prize.</p>
   <div class="section"><h2>Activity</h2></div>
-  ${state.activity.length ? `<div class="panel">${state.activity.map((a) => `<div class="row">
+  ${activity.length ? `<div class="panel">${activity.map((a) => `<div class="row activity">
       <span class="icon">${esc(a.icon)}</span>
       <div class="grow">
-        <div><b>${esc(member(a.member_id)?.name ?? 'Someone')}</b> ${a.kind === 'done' ? 'did' : 'passed on'} ${esc(a.title)}</div>
-        <div class="sub">${when(a.date)}${a.kind === 'done' ? ` · +${a.points}` : ''}</div>
+        <div><b>${esc(member(a.member_id)?.name ?? 'Someone')}</b> ${a.kind === 'done' ? 'did' : 'passed on'} ${esc(a.title)}${a.private ? ' 🔒' : ''}</div>
+        <div class="sub">${when(a.date)}${a.kind === 'done' && !a.private ? ` · +${a.points}${'next_assignee' in a ? ` · ${nextUp(a.next_assignee)}` : ''}` : ''}</div>
+        ${a.kind === 'done' && !a.private ? reactionsRow(a) : ''}
       </div>
       ${a.undoable ? `<button class="link" data-action="undo" data-id="${a.id}">Undo</button>` : ''}
     </div>`).join('')}</div>` : `<p class="hint">Finished chores show up here.</p>`}
@@ -458,6 +571,23 @@ function scoresView() {
       <div class="sub">${w.points} points${p ? ` · ${esc(p)}` : ''}</div></div>
     </div>` : '';
   }).join('')}</div>` : ''}`;
+}
+
+/** Congratulations under a finished chore: a chip per emoji, personal messages, and a button to add yours. */
+function reactionsRow(a) {
+  const counts = {};
+  const notes = [];
+  for (const [mid, value] of Object.entries(a.reactions ?? {})) {
+    const { emoji, text } = store.reactionOf(value);
+    (counts[emoji] ??= []).push(mid);
+    if (text) notes.push(`<div class="cheer"><b>${esc(member(mid)?.name ?? 'Someone')}</b> ${esc(emoji)} ${esc(text)}</div>`);
+  }
+  const chips = Object.entries(counts).map(([emoji, mids]) => {
+    const who = mids.map((mid) => member(mid)?.name ?? 'Someone').join(', ');
+    return `<button class="reaction" data-action="react" data-id="${a.id}" data-emoji="${esc(emoji)}" aria-pressed="${mids.includes(session.memberId)}" title="${esc(who)}">${esc(emoji)} ${mids.length}</button>`;
+  }).join('');
+  const add = a.member_id === session.memberId ? '' : `<button class="reaction add" data-action="congrats" data-id="${a.id}">🎉 Congratulate</button>`;
+  return chips || add || notes.length ? `<div class="reactions">${chips}${add}</div>${notes.join('')}` : '';
 }
 
 const myPrefs = () => remindPrefs(me());
@@ -480,10 +610,16 @@ function remindersPanel() {
         : 'Never: pick at least one time'}</div></div>
       <div class="hours">${REMINDER_HOURS.map((h) => `<button data-action="toggle-hour" data-hour="${h}" aria-pressed="${prefs.hours.includes(h)}">${pad(h)}</button>`).join('')}</div>
     </div>
+    <div class="row stack">
+      <div>Warn me ahead<div class="sub">${prefs.overdue_only ? 'Off while “only overdue” is on' : prefs.ahead ? `Starting ${plural(prefs.ahead, 'day')} before a chore is due` : 'Only once a chore is due'}</div></div>
+      <div class="seg">${REMIND_AHEAD.map((d) => `<button data-action="set-ahead" data-days="${d}" aria-pressed="${prefs.ahead === d}">${d ? `${d} day${d > 1 ? 's' : ''}` : 'On the day'}</button>`).join('')}</div>
+    </div>
     <label class="row check-row"><input type="checkbox" data-pref="overdue_only" ${prefs.overdue_only ? 'checked' : ''}>
       <span class="grow">Only for overdue chores<span class="sub">Not on the day they are due</span></span></label>
     <label class="row check-row"><input type="checkbox" data-pref="open" ${prefs.open ? 'checked' : ''}>
       <span class="grow">Include chores anyone can do<span class="sub">The ones set to "whoever gets to it"</span></span></label>
+    <label class="row check-row"><input type="checkbox" data-pref="messages" ${prefs.messages ? 'checked' : ''}>
+      <span class="grow">Messages from flatmates<span class="sub">When someone reminds you of a chore or congratulates you</span></span></label>
     <div class="row"><div class="grow sub">${muted ? `${plural(muted, 'chore')} muted for you.` : 'To mute a single chore, open it and turn off its reminder.'} These settings are yours and apply on all your devices.</div></div>
   </div>`;
 }
@@ -494,7 +630,14 @@ function flatView() {
     : installEvent
       ? `<div class="row"><div class="grow">Install as an app</div><button class="link" data-action="install">Install</button></div>`
       : `<div class="row"><div class="grow sub">Install as an app: ${isIOS() ? 'tap Share in Safari, then Add to Home Screen.' : 'open the browser menu and choose Install app or Add to Home screen.'}</div></div>`;
-  return `<div class="section"><h2>Invite flatmates</h2></div>
+  return `<div class="section"><h2>📌 Flat notes</h2></div>
+  <div class="panel pinboard">
+    <div class="row"><div class="grow">${state.flat.notes
+      ? `<div class="notes-text">${esc(state.flat.notes)}</div>`
+      : '<div class="sub">Wi-Fi password, bin days, house rules… Anyone in the flat can edit this.</div>'}</div>
+      <button class="link" data-action="edit-flat-notes">${state.flat.notes ? 'Edit' : 'Add'}</button></div>
+  </div>
+  <div class="section"><h2>Invite flatmates</h2></div>
   <div class="panel" style="padding-bottom:14px">
     <div class="code">${formatCode(state.flat.code)}</div>
     <p class="hint" style="text-align:center">Anyone with this code can see and edit the flat.</p>
@@ -568,15 +711,25 @@ function detailSheet(id) {
   if (!c) return;
   const due = dueLabel(c);
   const people = activeMembers();
+  const now = pointsFor(c.points, c.next_due, todayStr());
+  const pointsNote = c.private_to
+    ? 'Private: only you see it, no points'
+    : `${EFFORT[c.points]} (${plural(c.points, 'point')})${now !== c.points ? ` · ${plural(now, 'point')} if done today` : ''}`;
+  const flag = c.urgent
+    ? `<div class="flag-box"><span class="grow">👋 <b>${esc(member(c.urgent.by)?.name ?? 'Someone')}</b>: ${esc(c.urgent.message || 'needs doing now')}</span>
+        ${c.urgent.by === session.memberId ? `<button class="link" data-action="unflag" data-id="${c.id}">Take back</button>` : ''}</div>`
+    : '';
   openSheet(`
-    <div class="sheet-head"><span class="icon">${esc(c.icon)}</span><h2>${esc(c.title)}</h2><button class="close" data-action="close" aria-label="Close">✕</button></div>
+    <div class="sheet-head"><span class="icon ${c.color ? 'tinted' : ''}"${tint(c)}>${esc(c.icon)}</span><h2>${esc(c.title)}</h2><button class="close" data-action="close" aria-label="Close">✕</button></div>
+    ${flag}
     <dl class="facts">
       <div><dt>Due</dt><dd class="meta" style="margin:0;font-size:15px"><span class="${due.cls}">${esc(due.text)}</span> (${shortDate(c.next_due)})</dd></div>
-      <div><dt>Repeats</dt><dd style="margin:0">${intervalLabel(c)} · ${EFFORT[c.points]} (${plural(c.points, 'point')})</dd></div>
+      <div><dt>Repeats</dt><dd style="margin:0">${intervalLabel(c)} · ${pointsNote}</dd></div>
       <div><dt>Turns</dt><dd style="margin:0;display:flex;gap:6px;flex-wrap:wrap">${c.rotation.length
         ? c.rotation.map((mid) => `<span class="chip ${mid === c.assignee_id ? 'turn' : ''}">${avatar(member(mid), 'sm')}${esc(member(mid)?.name)}</span>`).join('')
         : 'Whoever gets to it'}</dd></div>
     </dl>
+    ${c.notes ? `<div class="notes">${esc(c.notes)}</div>` : ''}
     <label class="choice" style="margin-top:12px"><input type="checkbox" data-mute="${c.id}" ${myPrefs().muted.includes(c.id) ? '' : 'checked'}>
       <span>Remind me about this chore<small>Only changes your own notifications</small></span></label>
     <form data-form="complete" data-id="${c.id}">
@@ -585,6 +738,8 @@ function detailSheet(id) {
       <div class="btns"><button class="btn">Mark as done</button></div>
     </form>
     <div class="btns">
+      ${!c.private_to && c.assignee_id !== session.memberId && store.nudgeTargets(c, session.memberId).length
+        ? `<button class="btn ghost" data-action="nudge" data-id="${c.id}">👋 Remind &amp; encourage ${esc(c.assignee_id ? member(c.assignee_id)?.name : 'everyone')}</button>` : ''}
       ${c.rotation.length > 1 ? `<button class="btn ghost" data-action="skip" data-id="${c.id}">Pass to the next person</button>` : ''}
       <div class="btns two" style="margin:0">
         <button class="btn ghost" data-action="edit" data-id="${c.id}">Edit</button>
@@ -593,9 +748,63 @@ function detailSheet(id) {
     </div>`);
 }
 
+function nudgeSheet(id) {
+  const c = chore(id);
+  if (!c) return;
+  const name = c.assignee_id ? member(c.assignee_id)?.name ?? 'there' : 'everyone';
+  const due = c.next_due <= todayStr();
+  const text = due
+    ? `Hey ${name}, “${c.title}” is still to do. You can do it! 💪 Good luck!`
+    : `Hey ${name}, “${c.title}” needs doing now. You can do it! 💪`;
+  openSheet(`
+    <div class="sheet-head"><h2>👋 Remind ${esc(name)}</h2><button class="close" data-action="close" aria-label="Close">✕</button></div>
+    <form data-form="nudge" data-id="${c.id}">
+      <label for="n-text">Message</label>
+      <textarea id="n-text" name="text" maxlength="200" rows="3" required>${esc(text)}</textarea>
+      <p class="hint">Keep this text or write your own.</p>
+      ${due ? '' : `<label class="choice" style="margin-top:12px"><input type="checkbox" name="make_due" checked>
+        <span>It needs doing now<small>Moves it from ${esc(dueLabel(c).text.replace(/^Tomorrow$/, 'tomorrow'))} to today, e.g. when the trash is full</small></span></label>`}
+      <p class="hint" style="margin-top:10px">${esc(name === 'everyone' ? 'Everyone sees' : `${name} sees`)} it on the chore right away and gets a notification within the hour.</p>
+      <div class="btns"><button class="btn">Send 👋</button></div>
+    </form>`);
+  const area = sheet.querySelector('textarea');
+  area.focus();
+  area.setSelectionRange(area.value.length, area.value.length);
+}
+
+function congratsSheet(entryId) {
+  const a = state.activity.find((x) => x.id === entryId);
+  if (!a) return;
+  const name = member(a.member_id)?.name ?? 'them';
+  const mine = a.reactions?.[session.memberId] && store.reactionOf(a.reactions[session.memberId]);
+  const emoji = mine?.emoji || store.REACTIONS[0];
+  openSheet(`
+    <div class="sheet-head"><h2>🎉 Congratulate ${esc(name)}</h2><button class="close" data-action="close" aria-label="Close">✕</button></div>
+    <p class="hint">${esc(name)} did ${esc(a.title)}.</p>
+    <form data-form="congrats" data-id="${a.id}">
+      <input type="hidden" name="emoji" value="${esc(emoji)}">
+      <div class="picker" data-picker="emoji" style="margin-top:14px">${store.REACTIONS.map((e) => `<button type="button" data-action="pick-value" data-value="${e}" aria-pressed="${e === emoji}">${e}</button>`).join('')}</div>
+      <label for="g-text">Message</label>
+      <textarea id="g-text" name="text" maxlength="200" rows="3">${esc(mine?.text || `Well done, ${name}! Thank you 🙌`)}</textarea>
+      <p class="hint">Keep this text, write your own, or leave it empty to just send the emoji. ${esc(name)} gets the message as a notification.</p>
+      <div class="btns"><button class="btn">Send 🎉</button></div>
+    </form>`);
+}
+
+function flatNotesSheet() {
+  openSheet(`
+    <div class="sheet-head"><h2>📌 Flat notes</h2><button class="close" data-action="close" aria-label="Close">✕</button></div>
+    <form data-form="flat-notes">
+      <label for="f-notes">Anyone in the flat can see and edit this.</label>
+      <textarea id="f-notes" name="notes" maxlength="2000" rows="10" placeholder="Wi-Fi: …&#10;Bins go out on Tuesday evening&#10;Quiet after 22:00">${esc(state.flat.notes)}</textarea>
+      <div class="btns"><button class="btn">Save</button></div>
+    </form>`);
+}
+
 function formSheet(id) {
   const c = id ? chore(id) : null;
-  const v = c ?? { title: '', icon: ICONS[0], interval_n: 1, interval_unit: 'week', points: 2, assign_mode: 'all', rotation: [], assignee_id: null, next_due: todayStr() };
+  const v = c ?? { title: '', icon: ICONS[0], interval_n: 1, interval_unit: 'week', points: 2, assign_mode: 'all', rotation: [], assignee_id: null, next_due: todayStr(), notes: '', color: '', private_to: null };
+  const isPrivate = Boolean(v.private_to);
   const icons = ICONS.includes(v.icon) ? ICONS : [v.icon, ...ICONS];
   const people = activeMembers();
   const mode = (value, title, sub) => `<label class="choice"><input type="radio" name="assign_mode" value="${value}" ${v.assign_mode === value ? 'checked' : ''}><span>${title}<small>${sub}</small></span></label>`;
@@ -605,9 +814,16 @@ function formSheet(id) {
       <label for="c-title">What needs doing?</label>
       <input id="c-title" name="title" type="text" maxlength="80" value="${esc(v.title)}" placeholder="e.g. Clean the bathroom" required>
 
+      <label for="c-notes">Notes <span class="sub">(optional)</span></label>
+      <textarea id="c-notes" name="notes" maxlength="500" rows="2" placeholder="e.g. Bags are under the sink. Glass goes to the container on the corner.">${esc(v.notes ?? '')}</textarea>
+
       <span class="label">Icon</span>
       <input type="hidden" name="icon" value="${esc(v.icon)}">
       <div class="picker" data-picker="icon">${icons.map((i) => `<button type="button" data-action="pick-value" data-value="${esc(i)}" aria-pressed="${i === v.icon}">${esc(i)}</button>`).join('')}</div>
+
+      <span class="label">Colour</span>
+      <input type="hidden" name="color" value="${esc(v.color ?? '')}">
+      <div class="picker colors" data-picker="color">${store.CHORE_COLORS.map((col) => `<button type="button" data-action="pick-value" data-value="${col}" aria-pressed="${col === (v.color ?? '')}" aria-label="${col ? 'Colour' : 'No colour'}" ${col ? `style="--chore:${col}"` : ''}>${col ? '' : '∅'}</button>`).join('')}</div>
 
       <label for="c-n">Repeat every</label>
       <div class="inline">
@@ -622,6 +838,10 @@ function formSheet(id) {
       <input type="hidden" name="points" value="${v.points}">
       <div class="seg" data-picker="points">${[1, 2, 3].map((p) => `<button type="button" data-action="pick-value" data-value="${p}" aria-pressed="${p === v.points}">${EFFORT[p]}</button>`).join('')}</div>
 
+      <label class="choice" style="margin-top:16px"><input type="checkbox" name="private" ${isPrivate ? 'checked' : ''}>
+        <span>🔒 Private chore<small>Just for you, like cleaning your own room. Others don't see it and it earns no points.</small></span></label>
+
+      <div id="shared-fields" ${isPrivate ? 'hidden' : ''}>
       <span class="label">Who does it?</span>
       ${mode('all', 'Everyone takes turns', 'New flatmates join the rotation automatically')}
       ${mode('custom', 'Only some people', 'One person, or a rotation you choose')}
@@ -637,6 +857,7 @@ function formSheet(id) {
           ${people.map((m) => `<option value="${m.id}" ${m.id === v.assignee_id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}
         </select>
       </div>
+      </div>
 
       <div class="btns"><button class="btn">${c ? 'Save changes' : 'Add chore'}</button></div>
     </form>`);
@@ -644,11 +865,35 @@ function formSheet(id) {
 
 // ---------- actions ----------
 
-async function complete(id, memberId = session.memberId) {
+/** `from` is where the confetti starts (a DOMRect), if anywhere. */
+async function complete(id, memberId = session.memberId, from = null) {
   const c = chore(id);
   if (!c) return;
-  const entryId = await run(() => store.completeChore(c.id, memberId, todayStr()));
-  if (entryId) toast(`Done: ${c.title} · +${c.points}`, { label: 'Undo', run: () => run(() => store.undo(entryId)) });
+  const entry = await run(() => store.completeChore(c.id, memberId, todayStr()));
+  if (!entry) return;
+  celebrate(from);
+  const extra = c.private_to ? '' : entry.points > c.points ? ` · +${entry.points} (early bonus!)` : ` · +${entry.points}`;
+  const who = memberId === session.memberId ? pick(CHEERS) : `Logged for ${member(memberId)?.name}.`;
+  toast(`${who} ${c.title}${extra}${c.private_to ? '' : ` · ${nextUp(entry.next_assignee)}`}`, { label: 'Undo', run: () => run(() => store.undo(entry.id)) });
+}
+
+/** A small burst of confetti from `box` (or the middle of the screen). */
+function celebrate(box) {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  box ??= { left: innerWidth / 2, top: innerHeight / 2, width: 0, height: 0 };
+  const x = box.left + box.width / 2;
+  const y = box.top + box.height / 2;
+  const colors = ['#0d9488', '#f59e0b', '#e11d48', '#7c3aed', '#2563eb', '#65a30d'];
+  for (let i = 0; i < 18; i += 1) {
+    const bit = document.createElement('i');
+    bit.className = 'confetti';
+    if (i % 4 === 0) { bit.textContent = ['🌸', '🌼', '🌷'][(i / 4) % 3]; bit.classList.add('flower'); }
+    const angle = (Math.PI * 2 * i) / 18 + Math.random() * 0.4;
+    const dist = 50 + Math.random() * 50;
+    bit.style.cssText = `left:${x}px;top:${y}px;background:${colors[i % colors.length]};--dx:${Math.cos(angle) * dist}px;--dy:${Math.sin(angle) * dist - 30}px;--r:${Math.random() * 360}deg`;
+    document.body.append(bit);
+    bit.addEventListener('animationend', () => bit.remove());
+  }
 }
 
 const actions = {
@@ -658,7 +903,13 @@ const actions = {
   new: () => formSheet(null),
   edit: (el) => formSheet(el.dataset.id),
   close: () => sheet.close(),
-  done: (el) => complete(el.dataset.id),
+  done: (el) => { el.classList.add('pop'); complete(el.dataset.id, session.memberId, el.getBoundingClientRect()); },
+  nudge: (el) => nudgeSheet(el.dataset.id),
+  congrats: (el) => congratsSheet(el.dataset.id),
+  'edit-flat-notes': () => flatNotesSheet(),
+  unflag: (el) => run(() => store.unflagChore(el.dataset.id)).then((ok) => { if (ok) detailSheet(el.dataset.id); }),
+  react: (el) => run(() => store.react(el.dataset.id, session.memberId, el.dataset.emoji)),
+  'set-ahead'(el) { run(() => store.setRemindPrefs(session.memberId, { ahead: Number(el.dataset.days) })); },
   undo: (el) => run(() => store.undo(el.dataset.id)),
 
   async skip(el) {
@@ -816,11 +1067,26 @@ const forms = {
     ui.setup = false;
     render();
   },
+  async nudge(data, form) {
+    await store.nudgeChore(form.dataset.id, session.memberId, data.get('text'), todayStr(), Boolean(data.get('make_due')));
+    sheet.close();
+    toast('Sent 👋 They’ll see it right away in the app.');
+  },
+  async congrats(data, form) {
+    await store.react(form.dataset.id, session.memberId, data.get('emoji'), data.get('text'));
+    sheet.close();
+    toast('Sent 🎉');
+  },
+  async 'flat-notes'(data) {
+    await store.setFlatNotes(data.get('notes'));
+    sheet.close();
+  },
   async complete(data, form) {
     sheet.close();
     await complete(form.dataset.id, data.get('member_id'));
   },
   async chore(data, form) {
+    const id = form.dataset.id;
     const body = {
       title: data.get('title'),
       icon: data.get('icon'),
@@ -831,8 +1097,10 @@ const forms = {
       rotation: data.getAll('rotation'),
       assignee_id: data.get('assignee_id') || null,
       next_due: data.get('next_due'),
+      notes: data.get('notes'),
+      color: data.get('color'),
+      private_to: data.get('private') ? (id ? chore(id)?.private_to ?? session.memberId : session.memberId) : null,
     };
-    const id = form.dataset.id;
     await (id ? store.updateChore(id, body) : store.addChores([body]));
     sheet.close();
   },
@@ -866,6 +1134,7 @@ document.addEventListener('change', (e) => {
     const muted = myPrefs().muted.filter((id) => id !== mute);
     run(() => store.setRemindPrefs(session.memberId, { muted: e.target.checked ? muted : [...muted, mute] }));
   }
+  if (e.target.name === 'private') sheet.querySelector('#shared-fields').hidden = e.target.checked;
   if (e.target.name !== 'assign_mode') return;
   sheet.querySelector('#custom-people').hidden = e.target.value !== 'custom';
   sheet.querySelector('#turn-field').hidden = e.target.value === 'anyone';

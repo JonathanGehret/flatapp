@@ -31,3 +31,22 @@ test('date validation', () => {
   assert.ok(!isDate('2026-02-30'));
   assert.ok(!isDate('2026-2-3'));
 });
+
+test('points depend on timing', async () => {
+  const { pointsFor } = await import('../web/schedule.js');
+  assert.equal(pointsFor(2, '2026-11-10', '2026-11-09'), 3); // a day early
+  assert.equal(pointsFor(2, '2026-11-10', '2026-11-08'), 3); // two days early
+  assert.equal(pointsFor(2, '2026-11-10', '2026-11-07'), 2); // too early for a bonus
+  assert.equal(pointsFor(2, '2026-11-10', '2026-11-10'), 2); // on the day
+  assert.equal(pointsFor(2, '2026-11-10', '2026-11-12'), 2); // a little late
+  assert.equal(pointsFor(2, '2026-11-10', '2026-11-13'), 1); // 3 days late
+  assert.equal(pointsFor(1, '2026-11-10', '2026-11-20'), 1); // never below 1
+  assert.equal(pointsFor(3, '2026-12-01', '2026-11-29'), 4);
+});
+
+test('reminder lead time defaults to 0 and ignores unknown values', async () => {
+  const { remindPrefs } = await import('../web/schedule.js');
+  assert.equal(remindPrefs({}).ahead, 0);
+  assert.equal(remindPrefs({ remind: { ahead: 2 } }).ahead, 2);
+  assert.equal(remindPrefs({ remind: { ahead: 9 } }).ahead, 0);
+});

@@ -8,13 +8,33 @@ and who has been doing how much.
   "whoever gets to it". The turn moves on when a chore is done.
 - **To-do view** per person, grouped into overdue, today, next 7 days, later.
 - **Pass on** a turn, **undo** a mistake, or log a chore for someone else.
-- **Points**: quick chores earn 1 point, medium 2, big 3.
+- **Points**: quick chores earn 1 point, medium 2, big 3. Finishing 1 to 2
+  days early earns a bonus point; 3 or more days late, one point less (never
+  below 1).
+- **Remind & encourage**: nudge whoever has the turn ("Hey, the bathroom is
+  still to do. You can do it!"), with the default text or your own. They see
+  it on the chore at once and get a notification at the next hourly reminder
+  run. For a chore that is not due yet ("the trash is full") it can also move
+  the chore to today.
+- **Notes and colours**: each chore can have a description and a colour.
+- **Private chores**: chores just for you, like cleaning your own room. Only
+  you see them and they earn no points. (They are hidden in the app, not
+  encrypted: anyone with the invite code could still read them in the data.)
+- **Everyone hears about it**: when someone finishes a chore, everyone with
+  the app open gets a pop-up saying who did what and who is next ("Next:
+  you"); chores done while the app was closed are summed up when it opens.
+- **Congratulate**: an emoji and a message (the default one or your own) for
+  whoever did a chore. They get a pop-up and a notification.
+- **Flat notes**: one shared notepad (Wi-Fi, bin days, house rules) that
+  everyone can edit.
+- Confetti, flowers and a friendly greeting.
 - **Monthly prize**: the flat writes down a reward ("dinner cooked by the
   others"); whoever has the most points at the end of the month wins it. The
   winner is announced in the app and past winners are kept.
 - **Reminders**: push notifications for chores that are due or overdue. Each
-  person picks their own times, can limit them to overdue chores, leave out
-  "whoever gets to it" chores, and mute single chores.
+  person picks their own times, can be warned up to 3 days ahead, limit
+  reminders to overdue chores, leave out "whoever gets to it" chores, and
+  mute single chores.
 - **QR codes**: one to invite flatmates, and a personal one to sign in on
   another phone or computer.
 - **Live sync**: changes show up on everyone's phone within a second.
@@ -64,7 +84,12 @@ firebase deploy --only hosting,firestore:rules --project YOUR_PROJECT_ID
 ```
 
 The app is now live at `https://YOUR_PROJECT_ID.web.app`. Run the same deploy
-command again after any change to `web/` or `firestore.rules`.
+command again after any change to `web/` or `firestore.rules`, or let GitHub
+do it: [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) deploys
+on every change to those files on `main`, using the `FIREBASE_SERVICE_ACCOUNT`
+secret from step 3. That service account needs the **Firebase Hosting Admin**
+and **Firebase Rules Admin** roles (Google Cloud console → IAM → edit the
+`firebase-adminsdk` account → Add another role).
 
 ### 3. Turn on reminders
 
@@ -123,17 +148,36 @@ app opens that address and starts signed in.
 - Chores set to "everyone takes turns" pick up new flatmates automatically.
   When someone leaves, their turns pass to the next person.
 - Reminders go to the person whose turn it is, for chores due today or
-  earlier, at the hours they picked. Chores without turns are announced to
+  earlier (or within the next days, if they asked to be warned ahead), at the
+  hours they picked. Chores without turns are announced to
   everyone who has not switched them off. Muted chores are left out.
+- Messages flatmates send (reminders to do a chore, congratulations) wait in
+  the flat's outbox and go out at the next run, whatever the hour, then are
+  deleted. Anyone can switch them off under **Flat → Reminders → Messages
+  from flatmates**.
+
+### Turning notifications off
+
+- **For this phone**: **Flat → Reminders → Notifications on this device →
+  Turn off**.
+- **Only some kinds**: choose your hours, mute single chores, or switch off
+  messages from flatmates in the same place. These follow you to all your
+  devices.
+- **Through the phone itself**: an installed PWA is listed like any app. On
+  Android, long-press the app icon → App info → Notifications. On iPhone,
+  Settings → Notifications → Flatapp.
 
 ## Data and access
 
 ```
 flats/{code}                  name, members (with reminder settings), chores,
                               prizes, monthly scores
-flats/{code}/log/{id}         one entry per finished or passed-on chore
+flats/{code}/log/{id}         one entry per finished or passed-on chore,
+                              with flatmates' reactions
 flats/{code}/devices/{id}     push tokens
-flats/{code}/private/reminders  last hour the reminder job handled
+flats/{code}/outbox/{id}      messages for flatmates, until the job sends them
+flats/{code}/private/reminders  last hour the reminder job handled, flags
+                              already announced
 ```
 
 The invite code is the document id. [`firestore.rules`](firestore.rules) lets

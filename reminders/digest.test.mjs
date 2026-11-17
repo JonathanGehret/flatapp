@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDigests, localDate, localHour } from './digest.mjs';
+import { buildDigests, messageTargets, CHEERS, localDate, localHour } from './digest.mjs';
 
 const chore = (title, assignee_id, next_due) => ({ title, icon: '🧹', assignee_id, next_due });
 const flat = (remind = {}) => ({
@@ -76,4 +76,34 @@ test('local date and hour follow the flat time zone', () => {
   assert.equal(localDate(now, 'Not/AZone'), '2026-11-10');
   assert.equal(localHour(new Date('2026-11-10T07:05:00Z'), 'Europe/Berlin'), 8); // winter, UTC+1
   assert.equal(localHour(new Date('2026-07-10T06:05:00Z'), 'Europe/Berlin'), 8); // summer, UTC+2
+});
+
+test('early warning: chores due within the chosen days', () => {
+  const mia = forMember(buildDigests(flat({ mia: { ahead: 2 } }), '2026-11-18'), 'mia');
+  assert.equal(mia.title, '2 chores waiting for you (2 overdue)');
+  assert.ok(mia.body.includes('Windows (in 2 days)'));
+  const upcoming = flat({ tom: { ahead: 1, open: false } });
+  upcoming.chores.d.next_due = '2026-11-11';
+  assert.equal(forMember(buildDigests(upcoming, '2026-11-10'), 'tom').title, 'Coming up: 1 chore');
+  assert.equal(forMember(buildDigests(upcoming, '2026-11-10'), 'tom').body, '🧹 Trash (tomorrow)');
+  // Without a lead time, a chore due tomorrow is not mentioned.
+  assert.equal(forMember(buildDigests(flat({ tom: { open: false } }), '2026-11-10'), 'tom'), undefined);
+});
+
+test('early warning is off with overdue only', () => {
+  const mia = forMember(buildDigests(flat({ mia: { ahead: 3, overdue_only: true } }), '2026-11-18'), 'mia');
+  assert.ok(!mia.body.includes('Windows'));
+});
+
+test('an encouraging line can be added', () => {
+  const mia = forMember(buildDigests(flat(), '2026-11-10', null, (list) => list[0]), 'mia');
+  assert.ok(mia.body.endsWith(`\n${CHEERS[0]}`));
+});
+
+test('messages from flatmates go to recipients still in the flat who want them', () => {
+  const f = flat({ tom: { messages: false } });
+  const now = Date.parse('2026-11-10T12:00:00Z');
+  const message = { to: ['mia', 'tom', 'old'], at: now - 3600e3 };
+  assert.deepEqual(messageTargets(f, message, now), ['mia']);
+  assert.deepEqual(messageTargets(f, { ...message, at: now - 25 * 3600e3 }, now), []); // too old
 });

@@ -35,13 +35,15 @@
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
-  background: var(--bg);
+  background: radial-gradient(120% 60% at 50% -10%, var(--accent-soft), transparent 60%) no-repeat, var(--bg);
+  min-height: 100dvh;
   color: var(--text);
   font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   -webkit-tap-highlight-color: transparent;
 }
 h1, h2, h3, p { margin: 0; }
-button, input, select { font: inherit; color: inherit; }
+button, input, select, textarea { font: inherit; color: inherit; }
+textarea { resize: vertical; min-height: 64px; }
 button { cursor: pointer; border: 0; background: none; padding: 0; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
@@ -174,7 +176,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .
 
 /* ---------- forms ---------- */
 label, .label { display: block; font-size: 13px; font-weight: 650; color: var(--muted); margin: 16px 0 6px; }
-input[type="text"], input[type="number"], input[type="date"], select {
+input[type="text"], input[type="number"], input[type="date"], select, textarea {
   width: 100%; padding: 12px; border-radius: 12px; min-height: 48px;
   border: 1px solid var(--line); background: var(--bg);
 }
@@ -228,7 +230,7 @@ dialog::backdrop { background: rgb(0 0 0 / 45%); }
 #toast {
   position: fixed; left: 50%; bottom: calc(84px + env(safe-area-inset-bottom)); z-index: 20;
   transform: translate(-50%, 20px); opacity: 0; pointer-events: none;
-  display: flex; align-items: center; gap: 14px; max-width: calc(100vw - 32px);
+  display: flex; align-items: center; gap: 14px; width: max-content; max-width: min(440px, calc(100vw - 32px));
   background: #1c2321; color: #fff; padding: 11px 16px; border-radius: 14px;
   font-size: 14px; font-weight: 500; transition: opacity .2s, transform .2s;
 }
@@ -253,3 +255,91 @@ dialog::backdrop { background: rgb(0 0 0 / 45%); }
 .check-row { margin: 0; font-size: 16px; font-weight: 500; color: var(--text); cursor: pointer; }
 .check-row input { width: 20px; height: 20px; accent-color: var(--accent); flex: none; }
 .check-row .sub { display: block; }
+
+/* ---------- polish: greeting, colours, flags, reactions ---------- */
+.top h1 {
+  background: linear-gradient(90deg, var(--text), var(--accent));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.fab { background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #2563eb)); transition: transform .15s; }
+.fab:active { transform: scale(.96); }
+.card, .person { transition: transform .12s, box-shadow .12s; }
+.card:active, .person:active { transform: scale(.985); }
+.tab[aria-current="page"] span { transform: translateY(-1px); }
+.hello {
+  margin: 8px 0 14px; padding: 14px 16px; border-radius: var(--radius);
+  background: linear-gradient(135deg, var(--accent-soft), color-mix(in srgb, var(--accent-soft) 40%, var(--surface)));
+}
+.hello b { font-size: 18px; display: block; margin-bottom: 2px; }
+.hello .sub { font-size: 13px; color: var(--muted); margin-top: 4px; }
+
+/* A chore's colour: a stripe on the card and a tinted icon. */
+.card.tinted { border-left: 5px solid var(--chore); padding-left: 9px; }
+.icon.tinted, .card.tinted .icon { background: color-mix(in srgb, var(--chore) 18%, var(--surface)); }
+.picker.colors button { border-radius: 50%; width: 34px; height: 34px; font-size: 15px; color: var(--muted); }
+.picker.colors button[style] { background: var(--chore); }
+.picker.colors button[aria-pressed="true"] { border-color: var(--text); box-shadow: 0 0 0 2px var(--surface) inset; }
+
+.card.urgent { box-shadow: 0 0 0 2px var(--danger), var(--shadow); }
+.flag { display: block; font-size: 13px; color: var(--danger); font-weight: 600; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flag-box { display: flex; align-items: center; gap: 8px; padding: 10px 12px; margin: 10px 0 0; border-radius: 12px; background: var(--danger-soft); color: var(--text); font-size: 15px; }
+.flag-box .link { margin-left: auto; }
+.note-mark { font-size: 13px; }
+.notes { margin: 12px 0 4px; padding: 10px 12px; border-radius: 12px; background: var(--bg); white-space: pre-wrap; font-size: 15px; }
+.gain.bonus { color: #b45309; }
+.gain.less { color: var(--danger); }
+@media (prefers-color-scheme: dark) { .gain.bonus { color: var(--warn); } }
+
+.reactions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.reaction {
+  padding: 2px 8px; border-radius: 99px; background: var(--bg); font-size: 13px;
+  border: 1px solid var(--line); font-variant-numeric: tabular-nums;
+}
+.reaction[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); }
+.reaction.add { color: var(--muted); }
+.react-menu { display: inline-flex; gap: 2px; padding: 2px 4px; border-radius: 99px; background: var(--bg); border: 1px solid var(--line); }
+.react-menu button { font-size: 18px; padding: 2px 4px; border-radius: 8px; }
+.react-menu button:active { transform: scale(1.3); }
+
+/* Done: the check pops and confetti flies. */
+.check.pop { animation: pop .35s ease-out; background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+@keyframes pop { 40% { transform: scale(1.25); } 100% { transform: scale(1); } }
+.confetti {
+  position: fixed; z-index: 30; width: 7px; height: 11px; border-radius: 2px; pointer-events: none;
+  animation: burst .9s cubic-bezier(.2, .7, .3, 1) forwards;
+}
+@keyframes burst {
+  to { transform: translate(var(--dx), calc(var(--dy) + 60px)) rotate(var(--r)); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .check.pop, .confetti { animation: none; } }
+
+/* ---------- congratulations, flat notes, flowers ---------- */
+.reaction.add { color: var(--accent); font-weight: 600; }
+.cheer { margin-top: 6px; padding: 6px 10px; border-radius: 10px; background: var(--bg); font-size: 14px; }
+.pinboard { background: linear-gradient(180deg, color-mix(in srgb, #facc15 14%, var(--surface)), var(--surface)); }
+.notes-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15px; }
+.flag-box .grow { flex: 1; min-width: 0; }
+
+.hello { position: relative; overflow: hidden; }
+.bloom {
+  position: absolute; right: 10px; top: 6px; font-size: 26px; letter-spacing: -4px;
+  opacity: .85; transform: rotate(8deg); pointer-events: none;
+}
+.hello b, .hello > div { position: relative; padding-right: 54px; }
+.hello > .sub { padding-right: 0; }
+
+/* A little garden at the bottom of each page. */
+main::after {
+  content: "🌱 🌷 🌼 🌸 🌻 🌿 🌷";
+  display: block; text-align: center; margin-top: 28px;
+  font-size: 18px; letter-spacing: 6px; opacity: .55; filter: saturate(.85);
+}
+.welcome::before {
+  content: "🌸 🌼 🌷";
+  display: block; font-size: 22px; letter-spacing: 6px; margin-bottom: 10px; opacity: .8;
+}
+.empty .big { animation: sway 3s ease-in-out infinite; display: inline-block; transform-origin: 50% 100%; }
+@keyframes sway { 50% { transform: rotate(-6deg); } }
+
+.confetti.flower { width: auto; height: auto; background: none !important; font-size: 16px; border-radius: 0; }
+@media (prefers-reduced-motion: reduce) { .empty .big { animation: none; } }
