@@ -21,16 +21,18 @@ service cloud.firestore {
       allow update: if validFlat(request.resource.data);
       allow delete: if false;
 
-      // Finished and passed-on chores. Entries are immutable; undo deletes one.
+      // Finished and passed-on chores. Entries are immutable apart from
+      // flatmates' reactions; undo deletes one.
       match /log/{entry} {
         allow read, delete: if true;
         allow create: if request.resource.data.kind in ['done', 'skip']
           && request.resource.data.points is int
-          && request.resource.data.points >= 0 && request.resource.data.points <= 3
+          && request.resource.data.points >= 0 && request.resource.data.points <= 4
           && request.resource.data.title is string && request.resource.data.title.size() <= 80
           && request.resource.data.date is string && request.resource.data.date.size() == 10
           && request.resource.data.at is number;
-        allow update: if false;
+        allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions'])
+          && request.resource.data.reactions is map && request.resource.data.reactions.size() <= 60;
       }
 
       // Push tokens. Devices can register and remove themselves, but tokens

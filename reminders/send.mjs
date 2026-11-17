@@ -11,7 +11,7 @@
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
-import { buildDigests, localDate, localHour } from './digest.mjs';
+import { buildDigests, buildNudges, flagTimes, localDate, localHour } from './digest.mjs';
 
 const dryRun = process.env.DRY_RUN === '1';
 const emulator = Boolean(process.env.FIRESTORE_EMULATOR_HOST);
@@ -37,6 +37,9 @@ const now = new Date();
 // remembers the last hour it was handled for, so a run that slips into the
 // next hour cannot remind anyone twice. Manual runs remind everyone,
 // whatever their hours.
+//
+// "Needs doing now" flags are sent on every run, whatever the hour, once
+// per flag.
 const scheduled = Boolean(process.env.SCHEDULE);
 
 let sent = 0;
@@ -48,14 +51,23 @@ for (const flatDoc of flats.docs) {
   const flat = flatDoc.data();
   const today = localDate(now, flat.tz);
   const hour = scheduled ? localHour(now, flat.tz) : null;
-  if (scheduled && !dryRun) {
-    // Not readable or writable by the app: firestore.rules has no rule for it.
-    const marker = flatDoc.ref.collection('private').doc('reminders');
-    const slot = `${today}T${String(hour).padStart(2, '0')}`;
-    if ((await marker.get()).data()?.last === slot) continue;
-    await marker.set({ last: slot });
+  // Not readable or writable by the app: firestore.rules has no rule for it.
+  const marker = flatDoc.ref.collection('private').doc('reminders');
+  const mark = (await marker.get()).data() ?? {};
+  const slot = `${today}T${String(hour).padStart(2, '0')}`;
+  const dueNow = !scheduled || mark.last !== slot;
+  const cheer = (list) => list[Math.floor(Math.random() * list.length)];
+  const digests = [
+    ...buildNudges(flat, mark.nudged ?? {}),
+    ...(dueNow ? buildDigests(flat, today, hour, cheer) : []),
+  ];
+  if (!dryRun) {
+    const nudged = flagTimes(flat);
+    const changed = JSON.stringify(nudged) !== JSON.stringify(mark.nudged ?? {});
+    if ((scheduled && dueNow) || changed) {
+      await marker.set({ last: scheduled ? slot : mark.last ?? null, nudged });
+    }
   }
-  const digests = buildDigests(flat, today, hour);
   if (!digests.length) continue;
 
   const devices = (await flatDoc.ref.collection('devices').get()).docs;
@@ -69,7 +81,7 @@ for (const flatDoc of flats.docs) {
     }
     const result = await getMessaging().sendEachForMulticast({
       tokens: targets.map((d) => d.data().token),
-      data: { title: digest.title, body: digest.body },
+      data: { title: digest.title, body: digest.body, tag: digest.tag ?? 'flatapp-reminder' },
       webpush: { headers: { Urgency: 'high', TTL: '43200' } }, // give up after 12 hours
     });
     for (const [i, response] of result.responses.entries()) {

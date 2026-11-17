@@ -15,14 +15,17 @@ import { initializeApp } from './vendor/firebase-app.js';
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager, connectFirestoreEmulator,
   collection, doc, getDocFromServer, setDoc, deleteDoc, onSnapshot, query, orderBy, limit,
-  writeBatch, FieldPath, increment, deleteField,
+  writeBatch, FieldPath, increment, deleteField, updateDoc,
 } from './vendor/firebase-firestore.js';
 import { firebaseConfig } from './firebase-config.js';
-import { isDate, nextDue, nextInRotation, remindPrefs, REMINDER_HOURS } from './schedule.js';
+import { isDate, nextDue, nextInRotation, pointsFor, remindPrefs, REMINDER_HOURS, REMIND_AHEAD } from './schedule.js';
 
 export const configured = Boolean(firebaseConfig.projectId);
 
 const COLORS = ['#0d9488', '#e11d48', '#7c3aed', '#ea580c', '#2563eb', '#65a30d', '#c026d3', '#ca8a04'];
+/** Colours a chore can be tagged with ('' is none). */
+export const CHORE_COLORS = ['', '#e11d48', '#ea580c', '#ca8a04', '#65a30d', '#0d9488', '#2563eb', '#7c3aed', '#c026d3'];
+export const REACTIONS = ['👏', '🙏', '❤️', '🔥', '✨', '😂'];
 // No 0/O, 1/I/L: codes get read aloud and typed on phones.
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const CODE_LENGTH = 10;
@@ -171,7 +174,7 @@ function leastLoaded(rotation, extraLoad = {}) {
   let best = null;
   let bestLoad = Infinity;
   for (const id of rotation) {
-    const load = (extraLoad[id] ?? 0) + Object.values(data.chores ?? {}).filter((c) => c.assignee_id === id).length;
+    const load = (extraLoad[id] ?? 0) + Object.values(data.chores ?? {}).filter((c) => c.assignee_id === id && !c.private_to).length;
     if (load < bestLoad) { best = id; bestLoad = load; }
   }
   return best;
@@ -231,6 +234,7 @@ export async function removeMember(id) {
   if (activeIds().length <= 1) fail('A flat needs at least one person');
   const pairs = [[['members', id, 'active'], false]];
   for (const [choreId, c] of choreList()) {
+    if (c.private_to === id) { pairs.push([['chores', choreId], deleteField()]); continue; }
     if (!c.rotation.includes(id)) continue;
     const rotation = c.rotation.filter((m) => m !== id);
     pairs.push([['chores', choreId, 'rotation'], rotation]);
@@ -247,6 +251,7 @@ export async function removeMember(id) {
 export function setRemindPrefs(memberId, changes) {
   const m = data.members[memberId] ?? fail('Unknown member');
   const next = { ...remindPrefs(m), ...changes };
+  if (!REMIND_AHEAD.includes(next.ahead)) fail('Invalid reminder lead time');
   next.hours = [...new Set(next.hours)].filter((h) => REMINDER_HOURS.includes(h)).sort((a, b) => a - b);
   // Forget muted chores that no longer exist.
   next.muted = [...new Set(next.muted)].filter((id) => data.chores?.[id]);
@@ -269,8 +274,14 @@ function choreFields(input) {
     || !['day', 'week', 'month'].includes(input.interval_unit)) fail('Invalid interval');
   if (![1, 2, 3].includes(input.points)) fail('Effort must be 1 to 3');
   if (!isDate(input.next_due)) fail('Invalid due date');
+  const notes = String(input.notes ?? '').trim();
+  if (notes.length > 500) fail('Keep the notes under 500 characters');
+  const color = CHORE_COLORS.includes(input.color) ? input.color : '';
+  // A private chore belongs to one person: only they see it, and it earns no points.
+  const privateTo = input.private_to && data.members[input.private_to]?.active ? input.private_to : null;
   let rotation;
-  if (input.assign_mode === 'all') rotation = activeIds();
+  if (privateTo) rotation = [privateTo];
+  else if (input.assign_mode === 'all') rotation = activeIds();
   else if (input.assign_mode === 'anyone') rotation = [];
   else if (input.assign_mode === 'custom') {
     rotation = activeIds().filter((id) => (input.rotation ?? []).includes(id));
@@ -282,9 +293,12 @@ function choreFields(input) {
     interval_n: input.interval_n,
     interval_unit: input.interval_unit,
     points: input.points,
-    assign_mode: input.assign_mode,
+    assign_mode: privateTo ? 'custom' : input.assign_mode,
     rotation,
     next_due: input.next_due,
+    notes,
+    color,
+    private_to: privateTo,
   };
 }
 
@@ -324,18 +338,22 @@ function logEntry(choreId, c, memberId, kind, date) {
     member_id: memberId,
     kind,
     date,
-    points: kind === 'done' ? c.points : 0,
+    points: kind === 'done' && !c.private_to ? pointsFor(c.points, c.next_due, date) : 0,
+    private: Boolean(c.private_to),
     // The chore's state before this entry, for undo.
     prev_due: c.next_due,
     prev_assignee: c.assignee_id,
     prev_log: c.last_log ?? null,
+    prev_urgent: c.urgent ?? null,
     at: Date.now(),
   };
 }
 
 /**
- * Whoever marks a chore done gets the points; the turn moves on and the next
- * due date counts from the day it was actually done. Returns the log entry id.
+ * Whoever marks a chore done gets the points (more when early, fewer when
+ * late, see pointsFor); the turn moves on and the next due date counts from
+ * the day it was actually done. Private chores earn no points. Returns the
+ * log entry.
  */
 export async function completeChore(id, memberId, date) {
   const c = data.chores[id] ?? fail('This chore no longer exists');
@@ -345,9 +363,42 @@ export async function completeChore(id, memberId, date) {
     [['chores', id, 'next_due'], nextDue(date, c.interval_n, c.interval_unit)],
     [['chores', id, 'assignee_id'], nextInRotation(c.rotation, c.assignee_id)],
     [['chores', id, 'last_log'], entryId],
-    ...scorePairs(date.slice(0, 7), memberId, c.points, 1),
+    [['chores', id, 'urgent'], null],
+    ...(c.private_to ? [] : scorePairs(date.slice(0, 7), memberId, entry.points, 1)),
   ], (batch) => batch.set(logRef(entryId), entry));
-  return entryId;
+  return { id: entryId, ...entry };
+}
+
+/**
+ * "Needs doing now" (e.g. the trash is full): the chore becomes due today and
+ * the person whose turn it is gets a notification at the next reminder run.
+ */
+export function flagChore(id, memberId, message, today) {
+  const c = data.chores[id] ?? fail('This chore no longer exists');
+  const text = String(message ?? '').trim();
+  if (text.length > 80) fail('Keep the message under 80 characters');
+  return write([
+    [['chores', id, 'urgent'], { by: memberId, at: Date.now(), message: text, prev_due: c.urgent?.prev_due ?? c.next_due }],
+    [['chores', id, 'next_due'], c.next_due < today ? c.next_due : today],
+  ]);
+}
+
+/** Takes the flag back; the chore keeps its earlier due date. */
+export function unflagChore(id) {
+  const c = data.chores[id] ?? fail('This chore no longer exists');
+  if (!c.urgent) return Promise.resolve();
+  return write([
+    [['chores', id, 'urgent'], null],
+    [['chores', id, 'next_due'], c.urgent.prev_due ?? c.next_due],
+  ]);
+}
+
+/** Sets (or, with the same emoji again, removes) a member's reaction to a log entry. */
+export function react(entryId, memberId, emoji) {
+  if (!REACTIONS.includes(emoji)) fail('Unknown reaction');
+  const entry = log.find((e) => e.id === entryId) ?? fail('This entry is gone');
+  const value = entry.reactions?.[memberId] === emoji ? deleteField() : emoji;
+  updateDoc(logRef(entryId), new FieldPath('reactions', memberId), value).catch(onWriteError);
 }
 
 /** Passes the turn to the next person without changing the due date. Returns who is up now. */
@@ -374,7 +425,8 @@ export async function undo(entryId) {
     [['chores', entry.chore_id, 'next_due'], entry.prev_due],
     [['chores', entry.chore_id, 'assignee_id'], valid ? entry.prev_assignee : c.assignee_id],
     [['chores', entry.chore_id, 'last_log'], entry.prev_log ?? null],
-    ...(entry.kind === 'done' ? scorePairs(entry.date.slice(0, 7), entry.member_id, -entry.points, -1) : []),
+    [['chores', entry.chore_id, 'urgent'], entry.prev_urgent ?? null],
+    ...(entry.kind === 'done' && !entry.private ? scorePairs(entry.date.slice(0, 7), entry.member_id, -entry.points, -1) : []),
   ], (batch) => batch.delete(logRef(entryId)));
 }
 

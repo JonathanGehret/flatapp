@@ -1,7 +1,7 @@
 // App-shell cache: network first so deploys show up at once, cache as the
 // offline fallback. Flat data is not handled here; Firestore keeps its own
 // offline copy.
-const CACHE = 'flatapp-shell-v4';
+const CACHE = 'flatapp-shell-v5';
 const SHELL = [
   './', 'style.css', 'app.js', 'store.js', 'schedule.js', 'push.js', 'firebase-config.js',
   'vendor/firebase-app.js', 'vendor/firebase-firestore.js', 'vendor/qrcode.mjs',
@@ -36,7 +36,7 @@ self.addEventListener('fetch', (e) => {
   );
 });
 
-// Reminders arrive as FCM data messages: { data: { title, body } }.
+// Reminders arrive as FCM data messages: { data: { title, body, tag } }.
 self.addEventListener('push', (e) => {
   let payload = {};
   try { payload = e.data.json(); } catch { /* not JSON: show the generic text */ }
@@ -45,7 +45,7 @@ self.addEventListener('push', (e) => {
     body: message.body || 'You have chores waiting.',
     icon: 'icon-192.png',
     badge: 'icon-192.png',
-    tag: 'flatapp-reminder', // a newer reminder replaces the older one
+    tag: message.tag || 'flatapp-reminder', // a newer reminder replaces the older one
   }));
 });
 

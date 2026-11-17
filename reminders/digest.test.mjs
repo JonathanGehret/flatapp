@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDigests, localDate, localHour } from './digest.mjs';
+import { buildDigests, buildNudges, flagTimes, CHEERS, localDate, localHour } from './digest.mjs';
 
 const chore = (title, assignee_id, next_due) => ({ title, icon: '🧹', assignee_id, next_due });
 const flat = (remind = {}) => ({
@@ -76,4 +76,39 @@ test('local date and hour follow the flat time zone', () => {
   assert.equal(localDate(now, 'Not/AZone'), '2026-11-10');
   assert.equal(localHour(new Date('2026-11-10T07:05:00Z'), 'Europe/Berlin'), 8); // winter, UTC+1
   assert.equal(localHour(new Date('2026-07-10T06:05:00Z'), 'Europe/Berlin'), 8); // summer, UTC+2
+});
+
+test('early warning: chores due within the chosen days', () => {
+  const mia = forMember(buildDigests(flat({ mia: { ahead: 2 } }), '2026-11-18'), 'mia');
+  assert.equal(mia.title, '2 chores waiting for you (2 overdue)');
+  assert.ok(mia.body.includes('Windows (in 2 days)'));
+  const upcoming = flat({ tom: { ahead: 1, open: false } });
+  upcoming.chores.d.next_due = '2026-11-11';
+  assert.equal(forMember(buildDigests(upcoming, '2026-11-10'), 'tom').title, 'Coming up: 1 chore');
+  assert.equal(forMember(buildDigests(upcoming, '2026-11-10'), 'tom').body, '🧹 Trash (tomorrow)');
+  // Without a lead time, a chore due tomorrow is not mentioned.
+  assert.equal(forMember(buildDigests(flat({ tom: { open: false } }), '2026-11-10'), 'tom'), undefined);
+});
+
+test('early warning is off with overdue only', () => {
+  const mia = forMember(buildDigests(flat({ mia: { ahead: 3, overdue_only: true } }), '2026-11-18'), 'mia');
+  assert.ok(!mia.body.includes('Windows'));
+});
+
+test('an encouraging line can be added', () => {
+  const mia = forMember(buildDigests(flat(), '2026-11-10', null, (list) => list[0]), 'mia');
+  assert.ok(mia.body.endsWith(`\n${CHEERS[0]}`));
+});
+
+test('"needs doing now" flags go to whoever has the turn, once', () => {
+  const f = flat();
+  f.chores.d.urgent = { by: 'mia', at: 111, message: 'The trash is full' };
+  f.chores.e.urgent = { by: 'tom', at: 222, message: '' };
+  const nudges = buildNudges(f);
+  assert.deepEqual(nudges.map((n) => n.memberId), ['tom', 'mia']); // the flagger is left out
+  assert.equal(nudges[0].title, '🧹 Trash: needs doing now');
+  assert.equal(nudges[0].body, 'Mia: The trash is full It’s your turn.');
+  assert.equal(nudges[1].body, 'Tom: Could you take care of it soon?');
+  assert.deepEqual(flagTimes(f), { d: 111, e: 222 });
+  assert.deepEqual(buildNudges(f, flagTimes(f)), []);
 });

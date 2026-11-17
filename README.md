@@ -8,13 +8,25 @@ and who has been doing how much.
   "whoever gets to it". The turn moves on when a chore is done.
 - **To-do view** per person, grouped into overdue, today, next 7 days, later.
 - **Pass on** a turn, **undo** a mistake, or log a chore for someone else.
-- **Points**: quick chores earn 1 point, medium 2, big 3.
+- **Points**: quick chores earn 1 point, medium 2, big 3. Finishing 1 to 2
+  days early earns a bonus point; 3 or more days late, one point less (never
+  below 1).
+- **Needs doing now**: flag a chore ("the trash is full") and it moves to the
+  top of the list; whoever has the turn gets a notification at the next
+  hourly reminder run.
+- **Notes and colours**: each chore can have a description and a colour.
+- **Private chores**: chores just for you, like cleaning your own room. Only
+  you see them and they earn no points. (They are hidden in the app, not
+  encrypted: anyone with the invite code could still read them in the data.)
+- **Reactions**: react to finished chores with an emoji; the person who did it
+  sees a toast. Confetti and a friendly greeting do the rest.
 - **Monthly prize**: the flat writes down a reward ("dinner cooked by the
   others"); whoever has the most points at the end of the month wins it. The
   winner is announced in the app and past winners are kept.
 - **Reminders**: push notifications for chores that are due or overdue. Each
-  person picks their own times, can limit them to overdue chores, leave out
-  "whoever gets to it" chores, and mute single chores.
+  person picks their own times, can be warned up to 3 days ahead, limit
+  reminders to overdue chores, leave out "whoever gets to it" chores, and
+  mute single chores.
 - **QR codes**: one to invite flatmates, and a personal one to sign in on
   another phone or computer.
 - **Live sync**: changes show up on everyone's phone within a second.
@@ -123,17 +135,22 @@ app opens that address and starts signed in.
 - Chores set to "everyone takes turns" pick up new flatmates automatically.
   When someone leaves, their turns pass to the next person.
 - Reminders go to the person whose turn it is, for chores due today or
-  earlier, at the hours they picked. Chores without turns are announced to
+  earlier (or within the next days, if they asked to be warned ahead), at the
+  hours they picked. Chores without turns are announced to
   everyone who has not switched them off. Muted chores are left out.
+- "Needs doing now" flags are sent once, at the next run, whatever the hour,
+  to whoever has the turn (or everyone, for chores without turns).
 
 ## Data and access
 
 ```
 flats/{code}                  name, members (with reminder settings), chores,
                               prizes, monthly scores
-flats/{code}/log/{id}         one entry per finished or passed-on chore
+flats/{code}/log/{id}         one entry per finished or passed-on chore,
+                              with flatmates' reactions
 flats/{code}/devices/{id}     push tokens
-flats/{code}/private/reminders  last hour the reminder job handled
+flats/{code}/private/reminders  last hour the reminder job handled, flags
+                              already announced
 ```
 
 The invite code is the document id. [`firestore.rules`](firestore.rules) lets
